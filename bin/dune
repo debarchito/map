@@ -1,0 +1,10 @@
+(executable
+ (public_name map)
+ (name main)
+ (libraries unix map)
+ (modules
+  ; parser
+  main))
+
+; (menhir
+;  (modules parser))
