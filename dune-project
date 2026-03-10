@@ -18,7 +18,7 @@
  (description "A visualizable ISA and a Lisp")
  (depends
   (ocaml
-   (>= "5.4.0"))
+   (>= "5.4.1"))
   (menhir
    (>= "20260209")))
  (tags ("lisp")))

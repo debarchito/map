@@ -1,7 +1,8 @@
 {
   inputs = {
-    nixpkgs.url = "github:nixos/nixpkgs/nixpkgs-unstable";
+    nixpkgs.url = "https://channels.nixos.org/nixos-unstable/nixexprs.tar.xz";
     flake-parts.url = "github:hercules-ci/flake-parts";
+    systems.url = "github:nix-systems/default";
     opam-nix.url = "github:tweag/opam-nix";
     opam-repository = {
       url = "github:ocaml/opam-repository";
@@ -10,6 +11,7 @@
   };
   outputs =
     {
+      systems,
       flake-parts,
       opam-nix,
       opam-repository,
@@ -20,10 +22,7 @@
         flake-parts.flakeModules.easyOverlay
       ];
 
-      systems = [
-        "x86_64-linux"
-        "aarch64-linux"
-      ];
+      systems = import systems;
 
       perSystem =
         { pkgs, system, ... }:

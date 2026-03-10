@@ -9,7 +9,7 @@ homepage: "https://github.com/debarchito/map"
 bug-reports: "https://github.com/debarchito/map/issues"
 depends: [
   "dune" {>= "3.21"}
-  "ocaml" {>= "5.4.0"}
+  "ocaml" {>= "5.4.1"}
   "menhir" {>= "20260209"}
   "odoc" {with-doc}
 ]
