@@ -18,7 +18,8 @@ type t =
   | MFloat     of float
   | MPtr       of int
   | MNativePtr of native_ptr
-  | MNull
+  | MNativeFn  of (t array -> t)
+  | MNil
 
 type error =
   | ENativeError
@@ -69,7 +70,8 @@ let is_int    = function MInt _       -> true | _ -> false
 let is_float  = function MFloat _     -> true | _ -> false
 let is_ptr    = function MPtr _       -> true | _ -> false
 let is_native = function MNativePtr _ -> true | _ -> false
-let is_null   = function MNull        -> true | _ -> false
+let is_fn     = function MNativeFn _  -> true | _ -> false
+let is_null   = function MNil        -> true | _ -> false
 
 let is_gc_root = function
   | MPtr _ | MNativePtr _ -> true
@@ -92,7 +94,8 @@ let pp fmt = function
   | MFloat f     -> Format.fprintf fmt "Float(%g)" f
   | MPtr p       -> Format.fprintf fmt "Ptr(0x%x)" p
   | MNativePtr _ -> Format.fprintf fmt "NativePtr(<opaque>)"
-  | MNull        -> Format.fprintf fmt "Null"
+  | MNativeFn _  -> Format.fprintf fmt "NativeFn(<fn>)"
+  | MNil        -> Format.fprintf fmt "Null"
 
 let to_string v =
   pp Format.str_formatter v;

@@ -1,0 +1,4 @@
+(library
+ (name map_std)
+ (modules vmstring)
+ (libraries map_core uutf))

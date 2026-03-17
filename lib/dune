@@ -1,3 +1,4 @@
 (library
  (name map)
- (modules config value heap vm))
+ (modules heap gc instr vm std)
+ (libraries map_core map_std))

@@ -1,3 +1,5 @@
+open Map_core
+
 type gen = Young | Old
 
 type gc_event =
@@ -42,8 +44,8 @@ module NoHeapTracer = struct
   type ctx = unit
   let on_alloc      () ~addr:_ ~size:_ ~tag:_ = ()
   let on_free       () ~addr:_                = ()
-  let on_promote    () ~addr:_               = ()
-  let on_gc         () _                     = ()
+  let on_promote    () ~addr:_                = ()
+  let on_gc         () _                      = ()
   let on_write_slot () ~chunk_idx:_ ~slot:_ _ = ()
 end
 
@@ -68,19 +70,20 @@ module FullHeapTracer = struct
       sample_rate;
       tick        = 0 }
   let on_alloc      ctx ~addr ~size ~tag = ctx.allocs   <- (addr, size, tag) :: ctx.allocs
-  let on_free       ctx ~addr           = ctx.frees    <- addr :: ctx.frees
-  let on_promote    ctx ~addr           = ctx.promotes <- addr :: ctx.promotes
-  let on_gc         ctx event           = ctx.events   <- event :: ctx.events
+  let on_free       ctx ~addr            = ctx.frees    <- addr :: ctx.frees
+  let on_promote    ctx ~addr            = ctx.promotes <- addr :: ctx.promotes
+  let on_gc         ctx event            = ctx.events   <- event :: ctx.events
   let on_write_slot ctx ~chunk_idx ~slot v =
     ctx.tick <- ctx.tick + 1;
     if ctx.tick mod ctx.sample_rate = 0 then
       Bytes.set ctx.metadata (chunk_idx * ctx.chunk_size + slot)
         (match v with
-         | Value.MNull        -> '\x00'
+         | Value.MNil         -> '\x00'
          | Value.MInt _       -> '\x01'
          | Value.MFloat _     -> '\x02'
          | Value.MPtr _       -> '\x03'
-         | Value.MNativePtr _ -> '\x04')
+         | Value.MNativePtr _ -> '\x04'
+         | Value.MNativeFn _  -> '\x05')
 end
 
 module type HEAP_INTF = sig
@@ -96,31 +99,35 @@ module type HEAP_INTF = sig
 
   type t
 
-  val create            : Config.t -> tracer_ctx -> t
-  val alloc             : t -> size:int -> tag:int -> int
-  val alloc_old         : t -> size:int -> tag:int -> int
-  val free_old          : t -> int -> unit
-  val read              : t -> int -> int -> Value.t
-  val write             : t -> int -> int -> Value.t -> unit
-  val get_tag           : t -> int -> int
-  val get_size          : t -> int -> int
-  val get_mark          : t -> int -> bool
-  val get_fwd           : t -> int -> int
-  val set_tag           : t -> int -> int -> unit
-  val set_mark          : t -> int -> bool -> unit
-  val set_fwd           : t -> int -> int -> unit
-  val is_young          : t -> int -> bool
-  val is_old            : t -> int -> bool
-  val is_card_dirty     : t -> int -> bool
-  val clear_card        : t -> int -> unit
-  val needs_minor_gc    : t -> bool
-  val reset_young       : t -> unit
+  val create                : Config.t -> tracer_ctx -> t
+  val alloc                 : t -> size:int -> tag:int -> int
+  val alloc_old             : t -> size:int -> tag:int -> int
+  val free_old              : t -> int -> unit
+  val read                  : t -> int -> int -> Value.t
+  val write                 : t -> int -> int -> Value.t -> unit
+  val get_tag               : t -> int -> int
+  val get_size              : t -> int -> int
+  val get_mark              : t -> int -> bool
+  val get_fwd               : t -> int -> int
+  val set_tag               : t -> int -> int -> unit
+  val set_mark              : t -> int -> bool -> unit
+  val set_fwd               : t -> int -> int -> unit
+  val is_young              : t -> int -> bool
+  val is_old                : t -> int -> bool
+  val is_card_dirty         : t -> int -> bool
+  val clear_card            : t -> int -> unit
+  val needs_minor_gc        : t -> bool
+  val reset_young           : t -> unit
+  val chunk_size            : t -> int
   val iter_young_chunks     : t -> (int -> chunk -> unit) -> unit
   val iter_old_chunks       : t -> (int -> chunk -> unit) -> unit
   val iter_dirty_old_chunks : t -> (int -> chunk -> unit) -> unit
-  val stats             : t -> stats
-  val inspect           : t -> int -> obj_info
-  val tracer            : t -> tracer_ctx
+  val iter_chunk_objects    : t -> int -> (int -> unit) -> unit
+  val iter_objects          : t -> (int -> unit) -> unit
+  val stats                 : t -> stats
+  val inspect               : t -> int -> obj_info
+  val tracer                : t -> tracer_ctx
+  val on_gc  : t -> gc_event -> unit
 end
 
 module Heap(H : HEAP_TRACER) : HEAP_INTF with type tracer_ctx = H.ctx = struct
@@ -147,7 +154,7 @@ module Heap(H : HEAP_TRACER) : HEAP_INTF with type tracer_ctx = H.ctx = struct
     tracer_ctx          : H.ctx;
   }
 
-  let header_words = 4
+  let header_words  = 4
   let hdr_tag_slot  = 0
   let hdr_size_slot = 1
   let hdr_mark_slot = 2
@@ -217,7 +224,7 @@ module Heap(H : HEAP_TRACER) : HEAP_INTF with type tracer_ctx = H.ctx = struct
     raw_set t addr field value
 
   let make_chunk size gen = {
-    data      = Array.make size Value.MNull;
+    data      = Array.make size Value.MNil;
     size;
     top       = 0;
     gen;
@@ -339,7 +346,7 @@ module Heap(H : HEAP_TRACER) : HEAP_INTF with type tracer_ctx = H.ctx = struct
             else               c.data.(!prev) <- Value.MInt next;
             set_header t free_addr ~tag ~size;
             for i = 0 to size - 1 do
-              c.data.(!cur + header_words + i) <- Value.MNull
+              c.data.(!cur + header_words + i) <- Value.MNil
             done;
             found := free_addr
           end else begin
@@ -358,7 +365,7 @@ module Heap(H : HEAP_TRACER) : HEAP_INTF with type tracer_ctx = H.ctx = struct
               c.free_list <- next;
               set_header t free_addr ~tag ~size;
               for i = 0 to size - 1 do
-                c.data.(!cur2 + header_words + i) <- Value.MNull
+                c.data.(!cur2 + header_words + i) <- Value.MNil
               done;
               found := free_addr
             end else
@@ -398,12 +405,12 @@ module Heap(H : HEAP_TRACER) : HEAP_INTF with type tracer_ctx = H.ctx = struct
     let c     = t.chunks.(c_idx) in
     let size  = get_size t addr in
     for i = 0 to size - 1 do
-      c.data.(s + i) <- Value.MNull
+      c.data.(s + i) <- Value.MNil
     done;
-    let hdr_s       = s - header_words in
-    set_header t addr ~tag:tag_free ~size:(size);
-    c.data.(hdr_s)  <- Value.MInt c.free_list;
-    c.free_list     <- hdr_s;
+    let hdr_s      = s - header_words in
+    set_header t addr ~tag:tag_free ~size;
+    c.data.(hdr_s) <- Value.MInt c.free_list;
+    c.free_list    <- hdr_s;
     H.on_free t.tracer_ctx ~addr
 
   let needs_minor_gc t =
@@ -414,10 +421,12 @@ module Heap(H : HEAP_TRACER) : HEAP_INTF with type tracer_ctx = H.ctx = struct
       let c = t.chunks.(i) in
       if c.gen = Young then begin
         c.top <- 0;
-        Array.fill c.data 0 (Array.length c.data) Value.MNull
+        Array.fill c.data 0 (Array.length c.data) Value.MNil
       end
     done;
     t.alloc_count <- 0
+
+  let chunk_size t = t.chunk_size
 
   let iter_young_chunks t f =
     for i = 0 to t.n_chunks - 1 do
@@ -432,6 +441,22 @@ module Heap(H : HEAP_TRACER) : HEAP_INTF with type tracer_ctx = H.ctx = struct
   let iter_dirty_old_chunks t f =
     for i = 0 to t.n_chunks - 1 do
       if t.chunks.(i).gen = Old && is_card_dirty t i then f i t.chunks.(i)
+    done
+
+  let iter_chunk_objects t ci f =
+    let c   = t.chunks.(ci) in
+    let pos = ref 0 in
+    while !pos < c.top do
+      let addr = ci * t.chunk_size + !pos + header_words in
+      let tag  = get_tag  t addr in
+      let size = get_size t addr in
+      if tag <> tag_free && tag <> tag_forward then f addr;
+      pos := !pos + header_words + size
+    done
+
+  let iter_objects t f =
+    for ci = 0 to t.n_chunks - 1 do
+      iter_chunk_objects t ci f
     done
 
   let stats t =
@@ -468,6 +493,7 @@ module Heap(H : HEAP_TRACER) : HEAP_INTF with type tracer_ctx = H.ctx = struct
       fields }
 
   let tracer t = t.tracer_ctx
+  let on_gc t ev = H.on_gc t.tracer_ctx ev
 end
 
 module FastHeap  = Heap(NoHeapTracer)
