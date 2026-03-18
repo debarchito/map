@@ -1,14 +1,14 @@
 type reg = int
 
-type instr =
+type t =
   | Nop
   | Halt
 
-  | Mov    of reg * reg
-  | Set    of reg * int
-  | SetF   of reg * float
-
-  | SetNil of reg
+  | Mov     of reg * reg
+  | Load    of reg * int
+  | LoadF   of reg * float
+  | LoadNil of reg
+  | LoadK   of reg * int
 
   | Add  of reg * reg * reg
   | Sub  of reg * reg * reg
@@ -30,7 +30,7 @@ type instr =
   | Eq   of reg * reg * reg
   | EqF  of reg * reg * reg
   | Ne   of reg * reg * reg
-  (* | NeF   of reg * reg * reg *)
+  | NeF  of reg * reg * reg
   | Lt   of reg * reg * reg
   | LtU  of reg * reg * reg
   | LtF  of reg * reg * reg
@@ -49,21 +49,23 @@ type instr =
   | Jz  of reg * int
   | Jnz of reg * int
 
-  | Call  of int * reg * reg * reg
-  | TCall of int * reg * reg
-  | NCall of reg * reg * reg * reg
-  | Ret   of reg
+  | Call   of int * reg * reg * reg
+  | TCall  of int * reg * reg
+  | DCall  of reg * reg * reg * reg
+  | TDCall of reg * reg * reg
+  | Ret    of reg
 
   | Try    of int * reg
   | EndTry
   | Throw  of reg
 
-let string_of_instr = function
+let to_string = function
   | Nop              -> "Nop"
   | Mov    (d,s)     -> Printf.sprintf "Mov        r%d <- r%d" d s
-  | Set    (d,n)     -> Printf.sprintf "Set        r%d <- %d" d n
-  | SetF   (d,f)     -> Printf.sprintf "SetF       r%d <- %g" d f
-  | SetNil  d        -> Printf.sprintf "SetNil     r%d" d
+  | Load   (d,n)     -> Printf.sprintf "Load       r%d <- %d" d n
+  | LoadF  (d,f)     -> Printf.sprintf "LoadF      r%d <- %g" d f
+  | LoadNil d        -> Printf.sprintf "LoadNil    r%d" d
+  | LoadK  (d,i)     -> Printf.sprintf "LoadK      r%d <- k[%d]" d i
   | Add  (d,a,b)     -> Printf.sprintf "Add        r%d <- r%d + r%d" d a b
   | Sub  (d,a,b)     -> Printf.sprintf "Sub        r%d <- r%d - r%d" d a b
   | Mul  (d,a,b)     -> Printf.sprintf "Mul        r%d <- r%d * r%d" d a b
@@ -76,6 +78,7 @@ let string_of_instr = function
   | Eq   (d,a,b)     -> Printf.sprintf "Eq         r%d <- r%d == r%d" d a b
   | EqF  (d,a,b)     -> Printf.sprintf "EqF        r%d <- r%d == r%d" d a b
   | Ne   (d,a,b)     -> Printf.sprintf "Ne         r%d <- r%d != r%d" d a b
+  | NeF  (d,a,b)     -> Printf.sprintf "NeF        r%d <- r%d != r%d" d a b
   | Lt   (d,a,b)     -> Printf.sprintf "Lt         r%d <- r%d < r%d" d a b
   | LtU  (d,a,b)     -> Printf.sprintf "LtU        r%d <- r%d < r%d (u)" d a b
   | LtF  (d,a,b)     -> Printf.sprintf "LtF        r%d <- r%d < r%d" d a b
@@ -90,17 +93,18 @@ let string_of_instr = function
   | ShrU (d,a,b)     -> Printf.sprintf "ShrU       r%d <- r%d >>> r%d" d a b
   | I2F  (d,s)       -> Printf.sprintf "I2F        r%d <- (float)r%d" d s
   | F2I  (d,s)       -> Printf.sprintf "F2I        r%d <- (int)r%d" d s
-  | Alloc (d,t,s)    -> Printf.sprintf "Alloc      r%d tag=%d size=%d" d t s
+  | Alloc    (d,t,s) -> Printf.sprintf "Alloc      r%d tag=%d size=%d" d t s
   | GetField (d,o,f) -> Printf.sprintf "GetField   r%d <- r%d[%d]" d o f
   | SetField (o,f,s) -> Printf.sprintf "SetField   r%d[%d] <- r%d" o f s
   | Jmp   t          -> Printf.sprintf "Jmp        -> %d" t
-  | Jnz  (r,t)       -> Printf.sprintf "Jnz        r%d -> %d" r t
   | Jz   (r,t)       -> Printf.sprintf "Jz         r%d -> %d" r t
-  | Call (t,s,e,rd)  -> Printf.sprintf "Call       pc=%d args=[r%d..r%d] ret->r%d" t s e rd
-  | TCall (t,s,e)    -> Printf.sprintf "TCall      pc=%d args=[r%d..r%d]" t s e
-  | NCall (f,s,e,rd) -> Printf.sprintf "NCall      r%d args=[r%d..r%d] ret->r%d" f s e rd
-  | Ret  r           -> Printf.sprintf "Ret        r%d" r
-  | Try  (h,c)       -> Printf.sprintf "Try        handler=%d catch->r%d" h c
+  | Jnz  (r,t)       -> Printf.sprintf "Jnz        r%d -> %d" r t
+  | Call   (t,s,e,r) -> Printf.sprintf "Call       pc=%d args=[r%d..r%d] ret->r%d" t s e r
+  | TCall  (t,s,e)   -> Printf.sprintf "TCall      pc=%d args=[r%d..r%d]" t s e
+  | DCall  (f,s,e,r) -> Printf.sprintf "DCall      r%d args=[r%d..r%d] ret->r%d" f s e r
+  | TDCall (f,s,e)   -> Printf.sprintf "TDCall     r%d args=[r%d..r%d]" f s e
+  | Ret    r         -> Printf.sprintf "Ret        r%d" r
+  | Try    (h,c)     -> Printf.sprintf "Try        handler=%d catch->r%d" h c
   | EndTry           -> "EndTry"
-  | Throw r          -> Printf.sprintf "Throw      r%d" r
+  | Throw  r         -> Printf.sprintf "Throw      r%d" r
   | Halt             -> "Halt"

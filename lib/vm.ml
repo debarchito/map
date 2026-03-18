@@ -1,9 +1,12 @@
 open Map_core
 
+let bytecode_id : Instr.t array Type.Id.t = Type.Id.make ()
+
 type frame = {
   return_pc : int;
   ret_dst   : int;
   reg_base  : int;
+  program   : Instr.t array;
 }
 
 type handler = {
@@ -12,15 +15,15 @@ type handler = {
   handler_reg   : int;
 }
 
-module type VM_TRACER = sig
+module type TRACER = sig
   type ctx
-  val on_instr : ctx -> pc:int -> Instr.instr -> unit
+  val on_instr : ctx -> pc:int -> Instr.t -> unit
   val on_call  : ctx -> pc:int -> target:int -> unit
   val on_ret   : ctx -> pc:int -> unit
   val on_throw : ctx -> pc:int -> unit
 end
 
-module NoVMTracer = struct
+module No_tracer = struct
   type ctx = unit
   let on_instr  () ~pc:_ _         = ()
   let on_call   () ~pc:_ ~target:_ = ()
@@ -28,37 +31,38 @@ module NoVMTracer = struct
   let on_throw  () ~pc:_           = ()
 end
 
-module FullVMTracer = struct
+module Full_tracer = struct
   type ctx = {
-    mutable instrs : (int * Instr.instr) list;
+    mutable instrs : (int * Instr.t) list;
     mutable calls  : (int * int) list;
     mutable rets   : int list;
     mutable throws : int list;
   }
   let make () = { instrs = []; calls = []; rets = []; throws = [] }
-  let on_instr  ctx ~pc instr    = ctx.instrs <- (pc, instr) :: ctx.instrs
-  let on_call   ctx ~pc ~target  = ctx.calls  <- (pc, target) :: ctx.calls
-  let on_ret    ctx ~pc          = ctx.rets   <- pc :: ctx.rets
-  let on_throw  ctx ~pc          = ctx.throws <- pc :: ctx.throws
+  let on_instr  ctx ~pc instr   = ctx.instrs <- (pc, instr) :: ctx.instrs
+  let on_call   ctx ~pc ~target = ctx.calls  <- (pc, target) :: ctx.calls
+  let on_ret    ctx ~pc         = ctx.rets   <- pc :: ctx.rets
+  let on_throw  ctx ~pc         = ctx.throws <- pc :: ctx.throws
 end
 
-module type VM_INTF = sig
+module type S = sig
   type tracer_ctx
   type heap_tracer_ctx
   type heap_t
   type t
-  val create     : Config.t -> Instr.instr array -> heap_tracer_ctx -> tracer_ctx -> t
+
+  val create     : Config.t -> Instr.t array -> heap_tracer_ctx -> tracer_ctx -> t
   val run        : t -> unit
   val step       : t -> unit
   val reset      : t -> unit
   val is_done    : t -> bool
   val get_reg    : t -> int -> Value.t
-  val get_status : t -> string
   val set_reg    : t -> int -> Value.t -> unit
+  val get_status : t -> string
   val heap       : t -> heap_t
 end
 
-module VM(H : Heap.HEAP_INTF)(T : VM_TRACER) : VM_INTF
+module Make(H : Heap.S)(T : TRACER) : S
   with type tracer_ctx      = T.ctx
   and  type heap_tracer_ctx = H.tracer_ctx
   and  type heap_t          = H.t = struct
@@ -67,7 +71,7 @@ module VM(H : Heap.HEAP_INTF)(T : VM_TRACER) : VM_INTF
   type heap_tracer_ctx = H.tracer_ctx
   type heap_t          = H.t
 
-  module G = Gc.GC(H)
+  module G = Gc.Make(H)
 
   type status =
     | Running
@@ -76,8 +80,9 @@ module VM(H : Heap.HEAP_INTF)(T : VM_TRACER) : VM_INTF
 
   type t = {
     heap               : H.t;
-    gc                 : Gc.gc_state;
-    program            : Instr.instr array;
+    gc                 : Config.Gc.t;
+    constants          : Value.t array;
+    program            : Instr.t array;
     regs               : Value.t array;
     frames             : frame array;
     mutable frame_sp   : int;
@@ -89,18 +94,16 @@ module VM(H : Heap.HEAP_INTF)(T : VM_TRACER) : VM_INTF
   }
 
   let create (cfg : Config.t) program heap_tracer_ctx tracer_ctx =
-    let heap = H.create cfg heap_tracer_ctx in
-    let gc   = G.make_state
-                 ~major_threshold:cfg.major_threshold
-                 ~major_growth_factor:cfg.major_growth_factor in
+    let heap = H.create cfg.heap heap_tracer_ctx in
     { heap;
-      gc;
+      gc          = cfg.gc;
+      constants   = Array.make cfg.bytecode.max_constants Value.Nil;
       program;
-      regs        = Array.make cfg.num_registers Value.MNil;
-      frames      = Array.make cfg.max_call_depth
-                      { return_pc = 0; ret_dst = 0; reg_base = 0 };
+      regs        = Array.make cfg.vm.num_registers Value.Nil;
+      frames      = Array.make cfg.vm.max_call_depth
+                      { return_pc = 0; ret_dst = 0; reg_base = 0; program };
       frame_sp    = 0;
-      handlers    = Array.make cfg.max_exception_depth
+      handlers    = Array.make cfg.vm.max_exception_depth
                       { handler_pc = 0; handler_frame = 0; handler_reg = 0 };
       handler_sp  = 0;
       pc          = 0;
@@ -110,6 +113,10 @@ module VM(H : Heap.HEAP_INTF)(T : VM_TRACER) : VM_INTF
   let fault vm msg =
     vm.status <- Fault msg
 
+  let current_program vm =
+    if vm.frame_sp = 0 then vm.program
+    else vm.frames.(vm.frame_sp - 1).program
+
   let current_base vm =
     if vm.frame_sp = 0 then 0
     else vm.frames.(vm.frame_sp - 1).reg_base
@@ -117,7 +124,7 @@ module VM(H : Heap.HEAP_INTF)(T : VM_TRACER) : VM_INTF
   let reg_get vm r =
     let i = current_base vm + r in
     if i < 0 || i >= Array.length vm.regs then
-      (fault vm (Printf.sprintf "register %d out of range" r); Value.MNil)
+      (fault vm (Printf.sprintf "register %d out of range" r); Value.Nil)
     else
       vm.regs.(i)
 
@@ -130,7 +137,7 @@ module VM(H : Heap.HEAP_INTF)(T : VM_TRACER) : VM_INTF
 
   let reg_get_abs vm i =
     if i < 0 || i >= Array.length vm.regs then
-      (fault vm (Printf.sprintf "register %d out of range" i); Value.MNil)
+      (fault vm (Printf.sprintf "register %d out of range" i); Value.Nil)
     else
       vm.regs.(i)
 
@@ -140,55 +147,61 @@ module VM(H : Heap.HEAP_INTF)(T : VM_TRACER) : VM_INTF
     else
       vm.regs.(i) <- v
 
-  let as_int vm v =
+  let to_int vm v =
     match v with
-    | Value.MInt n -> n
-    | _ -> fault vm "expected int"; 0
+    | Value.Int n -> n
+    | _ -> fault vm "expected Int"; 0
 
-  let as_float vm v =
+  let to_float vm v =
     match v with
-    | Value.MFloat f -> f
-    | _ -> fault vm "expected float"; 0.0
+    | Value.Float f -> f
+    | _ -> fault vm "expected Float"; 0.0
 
-  let as_ptr vm v =
+  let to_ptr vm v =
     match v with
-    | Value.MPtr p -> p
-    | _ -> fault vm "expected ptr"; 0
+    | Value.Ptr p -> p
+    | _ -> fault vm "expected Ptr"; 0
 
-  let guard vm f =
+  let rec guard vm f =
     match f () with
-    | v                                -> v
-    | exception Value.EBoundsError   m -> fault vm m; Value.MNil
-    | exception Value.EAllocError    m -> fault vm m; Value.MNil
-    | exception Value.ETypeError     m -> fault vm m; Value.MNil
-    | exception Value.EDivByZero     m -> fault vm m; Value.MNil
-    | exception Value.EStackOverflow m -> fault vm m; Value.MNil
-    | exception Value.ENativeError   e ->
-        fault vm (Printexc.to_string e); Value.MNil
+    | v                                    -> v
+    | exception Exception.Bounds_error   m -> fault vm m; Value.Nil
+    | exception Exception.Alloc_error    m -> fault vm m; Value.Nil
+    | exception Exception.Type_error     m -> fault vm m; Value.Nil
+    | exception Exception.Div_by_zero    m -> fault vm m; Value.Nil
+    | exception Exception.Stack_overflow m -> fault vm m; Value.Nil
+    | exception Exception.Native_error   e ->
+        fault vm (Printexc.to_string e); Value.Nil
+    | exception Exception.Registered (code, _) ->
+        throw_code vm code; Value.Nil
 
-  let guard_ vm f =
+  and guard_ vm f =
     match f () with
-    | ()                               -> ()
-    | exception Value.EBoundsError   m -> fault vm m
-    | exception Value.EAllocError    m -> fault vm m
-    | exception Value.ETypeError     m -> fault vm m
-    | exception Value.EDivByZero     m -> fault vm m
-    | exception Value.EStackOverflow m -> fault vm m
-    | exception Value.ENativeError   e ->
+    | ()                                   -> ()
+    | exception Exception.Bounds_error   m -> fault vm m
+    | exception Exception.Alloc_error    m -> fault vm m
+    | exception Exception.Type_error     m -> fault vm m
+    | exception Exception.Div_by_zero    m -> fault vm m
+    | exception Exception.Stack_overflow m -> fault vm m
+    | exception Exception.Native_error   e ->
         fault vm (Printexc.to_string e)
+    | exception Exception.Registered (code, _) ->
+        throw_code vm code
 
-  let guard_int vm f =
+  and guard_int vm f =
     match f () with
-    | v                                -> v
-    | exception Value.EBoundsError   m -> fault vm m; -1
-    | exception Value.EAllocError    m -> fault vm m; -1
-    | exception Value.ETypeError     m -> fault vm m; -1
-    | exception Value.EDivByZero     m -> fault vm m; -1
-    | exception Value.EStackOverflow m -> fault vm m; -1
-    | exception Value.ENativeError   e ->
+    | v                                    -> v
+    | exception Exception.Bounds_error   m -> fault vm m; -1
+    | exception Exception.Alloc_error    m -> fault vm m; -1
+    | exception Exception.Type_error     m -> fault vm m; -1
+    | exception Exception.Div_by_zero    m -> fault vm m; -1
+    | exception Exception.Stack_overflow m -> fault vm m; -1
+    | exception Exception.Native_error   e ->
         fault vm (Printexc.to_string e); -1
+    | exception Exception.Registered (code, _) ->
+        throw_code vm code; -1
 
-  let throw_code vm code =
+  and throw_code vm code =
     T.on_throw vm.tracer_ctx ~pc:vm.pc;
     if vm.handler_sp = 0 then
       fault vm (Printf.sprintf "uncaught exception code %d" code)
@@ -196,13 +209,13 @@ module VM(H : Heap.HEAP_INTF)(T : VM_TRACER) : VM_INTF
       let h          = vm.handlers.(vm.handler_sp - 1) in
       vm.handler_sp <- vm.handler_sp - 1;
       vm.frame_sp   <- h.handler_frame;
-      reg_set_abs vm (current_base vm + h.handler_reg) (Value.MInt code);
+      reg_set_abs vm h.handler_reg (Value.Int code);
       vm.pc         <- h.handler_pc;
       vm.status     <- Running
     end
 
   let throw vm reg =
-    throw_code vm (as_int vm (reg_get vm reg))
+    throw_code vm (to_int vm (reg_get vm reg))
 
   let maybe_gc vm =
     if H.needs_minor_gc vm.heap then begin
@@ -212,15 +225,79 @@ module VM(H : Heap.HEAP_INTF)(T : VM_TRACER) : VM_INTF
       | _             -> ()
     end
 
+  let do_call vm ~pc ~target ~arg_start ~arg_end ~ret_dst ~program =
+    if vm.frame_sp >= Array.length vm.frames then
+      throw_code vm (Exception.to_int Exception.Stack_overflow)
+    else begin
+      T.on_call vm.tracer_ctx ~pc ~target;
+      let base = current_base vm in
+      vm.frames.(vm.frame_sp) <- {
+        return_pc = vm.pc;
+        ret_dst   = base + ret_dst;
+        reg_base  = base + arg_start;
+        program;
+      };
+      vm.frame_sp <- vm.frame_sp + 1;
+      vm.pc       <- target;
+      ignore arg_end
+    end
+
+  let do_tcall vm ~pc ~target ~arg_start ~arg_end ~program =
+    if vm.frame_sp = 0 then
+      fault vm "tail call from top level"
+    else begin
+      T.on_call vm.tracer_ctx ~pc ~target;
+      let base  = current_base vm in
+      let frame = vm.frames.(vm.frame_sp - 1) in
+      vm.frames.(vm.frame_sp - 1) <- {
+        frame with
+        reg_base = base + arg_start;
+        program;
+      };
+      vm.pc <- target;
+      ignore arg_end
+    end
+
+  let do_dcall vm ~pc ~fn_reg ~arg_start ~arg_end ~ret_dst =
+    let base = current_base vm in
+    let args = Array.sub vm.regs (base + arg_start) (arg_end - arg_start + 1) in
+    match reg_get vm fn_reg with
+    | Value.NativeFun fn ->
+      let result = guard vm (fun () -> fn args) in
+      reg_set vm ret_dst result
+    | Value.Ptr addr when H.get_tag vm.heap addr = Tag.closure ->
+      let code_val = guard vm (fun () -> H.read vm.heap addr 0) in
+      (match Value.get_native bytecode_id code_val with
+       | Some code ->
+         do_call vm ~pc ~target:0 ~arg_start ~arg_end ~ret_dst ~program:code
+       | None -> fault vm "DCall: closure has invalid code pointer")
+    | _ -> fault vm "DCall: expected NativeFun or closure Ptr"
+
+  let do_tdcall vm ~pc ~fn_reg ~arg_start ~arg_end =
+    let base = current_base vm in
+    let args = Array.sub vm.regs (base + arg_start) (arg_end - arg_start + 1) in
+    match reg_get vm fn_reg with
+    | Value.NativeFun fn ->
+      let result = guard vm (fun () -> fn args) in
+      ignore result
+    | Value.Ptr addr when H.get_tag vm.heap addr = Tag.closure ->
+      let code_val = guard vm (fun () -> H.read vm.heap addr 0) in
+      (match Value.get_native bytecode_id code_val with
+       | Some code ->
+         do_tcall vm ~pc ~target:0 ~arg_start ~arg_end ~program:code
+       | None -> fault vm "TDCall: closure has invalid code pointer")
+    | _ -> fault vm "TDCall: expected NativeFun or closure Ptr"
+
   let step vm =
     match vm.status with
     | Halted | Fault _ -> ()
     | Running ->
-      let pc = vm.pc in
-      if pc < 0 || pc >= Array.length vm.program then
+      let pc      = vm.pc in
+      let program = current_program vm in
+      if pc < 0 || pc >= Array.length program then
         fault vm (Printf.sprintf "pc %d out of bounds" pc)
       else begin
-        let instr = vm.program.(pc) in
+        let instr = program.(pc) in
         T.on_instr vm.tracer_ctx ~pc instr;
         vm.pc <- pc + 1;
         match instr with
@@ -230,139 +307,149 @@ module VM(H : Heap.HEAP_INTF)(T : VM_TRACER) : VM_INTF
         | Instr.Mov (dst, src) ->
           reg_set vm dst (reg_get vm src)
 
-        | Instr.Set (dst, n) ->
-          reg_set vm dst (Value.MInt n)
+        | Instr.Load (dst, n) ->
+          reg_set vm dst (Value.Int n)
 
-        | Instr.SetF (dst, f) ->
-          reg_set vm dst (Value.MFloat f)
+        | Instr.LoadF (dst, f) ->
+          reg_set vm dst (Value.Float f)
 
-        | Instr.SetNil dst ->
-          reg_set vm dst Value.MNil
+        | Instr.LoadNil dst ->
+          reg_set vm dst Value.Nil
+
+        | Instr.LoadK (dst, idx) ->
+          if idx < 0 || idx >= Array.length vm.constants then
+            fault vm (Printf.sprintf "constant index %d out of range" idx)
+          else
+            reg_set vm dst vm.constants.(idx)
 
         | Instr.Add (dst, a, b) ->
-          reg_set vm dst (Value.MInt
-            (as_int vm (reg_get vm a) + as_int vm (reg_get vm b)))
+          reg_set vm dst (Value.Int
+            (to_int vm (reg_get vm a) + to_int vm (reg_get vm b)))
 
         | Instr.Sub (dst, a, b) ->
-          reg_set vm dst (Value.MInt
-            (as_int vm (reg_get vm a) - as_int vm (reg_get vm b)))
+          reg_set vm dst (Value.Int
+            (to_int vm (reg_get vm a) - to_int vm (reg_get vm b)))
 
         | Instr.Mul (dst, a, b) ->
-          reg_set vm dst (Value.MInt
-            (as_int vm (reg_get vm a) * as_int vm (reg_get vm b)))
+          reg_set vm dst (Value.Int
+            (to_int vm (reg_get vm a) * to_int vm (reg_get vm b)))
 
         | Instr.Div (dst, a, b) ->
-          let divisor = as_int vm (reg_get vm b) in
+          let divisor = to_int vm (reg_get vm b) in
           if divisor = 0 then
-            throw_code vm (Value.int_of_error Value.EDivByZero)
+            throw_code vm (Exception.to_int Exception.Div_by_zero)
           else
-            reg_set vm dst (Value.MInt (as_int vm (reg_get vm a) / divisor))
+            reg_set vm dst (Value.Int (to_int vm (reg_get vm a) / divisor))
 
         | Instr.Mod (dst, a, b) ->
-          let divisor = as_int vm (reg_get vm b) in
+          let divisor = to_int vm (reg_get vm b) in
           if divisor = 0 then
-            throw_code vm (Value.int_of_error Value.EDivByZero)
+            throw_code vm (Exception.to_int Exception.Div_by_zero)
           else
-            reg_set vm dst (Value.MInt (as_int vm (reg_get vm a) mod divisor))
+            reg_set vm dst (Value.Int (to_int vm (reg_get vm a) mod divisor))
 
         | Instr.AddF (dst, a, b) ->
-          reg_set vm dst (Value.MFloat
-            (as_float vm (reg_get vm a) +. as_float vm (reg_get vm b)))
+          reg_set vm dst (Value.Float
+            (to_float vm (reg_get vm a) +. to_float vm (reg_get vm b)))
 
         | Instr.SubF (dst, a, b) ->
-          reg_set vm dst (Value.MFloat
-            (as_float vm (reg_get vm a) -. as_float vm (reg_get vm b)))
+          reg_set vm dst (Value.Float
+            (to_float vm (reg_get vm a) -. to_float vm (reg_get vm b)))
 
         | Instr.MulF (dst, a, b) ->
-          reg_set vm dst (Value.MFloat
-            (as_float vm (reg_get vm a) *. as_float vm (reg_get vm b)))
+          reg_set vm dst (Value.Float
+            (to_float vm (reg_get vm a) *. to_float vm (reg_get vm b)))
 
         | Instr.DivF (dst, a, b) ->
-          reg_set vm dst (Value.MFloat
-            (as_float vm (reg_get vm a) /. as_float vm (reg_get vm b)))
+          reg_set vm dst (Value.Float
+            (to_float vm (reg_get vm a) /. to_float vm (reg_get vm b)))
 
         | Instr.And (dst, a, b) ->
-          reg_set vm dst (Value.MInt
-            (as_int vm (reg_get vm a) land as_int vm (reg_get vm b)))
+          reg_set vm dst (Value.Int
+            (to_int vm (reg_get vm a) land to_int vm (reg_get vm b)))
 
         | Instr.Or (dst, a, b) ->
-          reg_set vm dst (Value.MInt
-            (as_int vm (reg_get vm a) lor as_int vm (reg_get vm b)))
+          reg_set vm dst (Value.Int
+            (to_int vm (reg_get vm a) lor to_int vm (reg_get vm b)))
 
         | Instr.Xor (dst, a, b) ->
-          reg_set vm dst (Value.MInt
-            (as_int vm (reg_get vm a) lxor as_int vm (reg_get vm b)))
+          reg_set vm dst (Value.Int
+            (to_int vm (reg_get vm a) lxor to_int vm (reg_get vm b)))
 
         | Instr.Shl (dst, a, b) ->
-          reg_set vm dst (Value.MInt
-            (as_int vm (reg_get vm a) lsl as_int vm (reg_get vm b)))
+          reg_set vm dst (Value.Int
+            (to_int vm (reg_get vm a) lsl to_int vm (reg_get vm b)))
 
         | Instr.Shr (dst, a, b) ->
-          reg_set vm dst (Value.MInt
-            (as_int vm (reg_get vm a) asr as_int vm (reg_get vm b)))
+          reg_set vm dst (Value.Int
+            (to_int vm (reg_get vm a) asr to_int vm (reg_get vm b)))
 
         | Instr.ShrU (dst, a, b) ->
-          reg_set vm dst (Value.MInt
-            (as_int vm (reg_get vm a) lsr as_int vm (reg_get vm b)))
+          reg_set vm dst (Value.Int
+            (to_int vm (reg_get vm a) lsr to_int vm (reg_get vm b)))
 
         | Instr.Eq (dst, a, b) ->
-          reg_set vm dst (Value.MInt
-            (if as_int vm (reg_get vm a) =  as_int vm (reg_get vm b) then 1 else 0))
+          reg_set vm dst (Value.Int
+            (if to_int vm (reg_get vm a) =  to_int vm (reg_get vm b) then 1 else 0))
 
         | Instr.EqF (dst, a, b) ->
-          reg_set vm dst (Value.MInt
-            (if as_float vm (reg_get vm a) =  as_float vm (reg_get vm b) then 1 else 0))
+          reg_set vm dst (Value.Int
+            (if to_float vm (reg_get vm a) =  to_float vm (reg_get vm b) then 1 else 0))
 
         | Instr.Ne (dst, a, b) ->
-          reg_set vm dst (Value.MInt
-            (if as_int vm (reg_get vm a) <> as_int vm (reg_get vm b) then 1 else 0))
+          reg_set vm dst (Value.Int
+            (if to_int vm (reg_get vm a) <> to_int vm (reg_get vm b) then 1 else 0))
+
+        | Instr.NeF (dst, a, b) ->
+          reg_set vm dst (Value.Int
+            (if to_float vm (reg_get vm a) <> to_float vm (reg_get vm b) then 1 else 0))
 
         | Instr.Lt (dst, a, b) ->
-          reg_set vm dst (Value.MInt
-            (if as_int vm (reg_get vm a) <  as_int vm (reg_get vm b) then 1 else 0))
+          reg_set vm dst (Value.Int
+            (if to_int vm (reg_get vm a) <  to_int vm (reg_get vm b) then 1 else 0))
 
         | Instr.LtF (dst, a, b) ->
-          reg_set vm dst (Value.MInt
-            (if as_float vm (reg_get vm a) <  as_float vm (reg_get vm b) then 1 else 0))
+          reg_set vm dst (Value.Int
+            (if to_float vm (reg_get vm a) <  to_float vm (reg_get vm b) then 1 else 0))
 
         | Instr.LtU (dst, a, b) ->
-          let a = as_int vm (reg_get vm a) land max_int in
-          let b = as_int vm (reg_get vm b) land max_int in
-          reg_set vm dst (Value.MInt (if a < b then 1 else 0))
+          let a = to_int vm (reg_get vm a) land max_int in
+          let b = to_int vm (reg_get vm b) land max_int in
+          reg_set vm dst (Value.Int (if a < b then 1 else 0))
 
         | Instr.Lte (dst, a, b) ->
-          reg_set vm dst (Value.MInt
-            (if as_int vm (reg_get vm a) <= as_int vm (reg_get vm b) then 1 else 0))
+          reg_set vm dst (Value.Int
+            (if to_int vm (reg_get vm a) <= to_int vm (reg_get vm b) then 1 else 0))
 
         | Instr.LteU (dst, a, b) ->
-          let a = as_int vm (reg_get vm a) land max_int in
-          let b = as_int vm (reg_get vm b) land max_int in
-          reg_set vm dst (Value.MInt (if a <= b then 1 else 0))
+          let a = to_int vm (reg_get vm a) land max_int in
+          let b = to_int vm (reg_get vm b) land max_int in
+          reg_set vm dst (Value.Int (if a <= b then 1 else 0))
 
         | Instr.LteF (dst, a, b) ->
-          reg_set vm dst (Value.MInt
-            (if as_float vm (reg_get vm a) <= as_float vm (reg_get vm b) then 1 else 0))
+          reg_set vm dst (Value.Int
+            (if to_float vm (reg_get vm a) <= to_float vm (reg_get vm b) then 1 else 0))
 
         | Instr.I2F (dst, src) ->
           reg_set vm dst
-            (Value.MFloat (float_of_int (as_int vm (reg_get vm src))))
+            (Value.Float (float_of_int (to_int vm (reg_get vm src))))
 
         | Instr.F2I (dst, src) ->
           reg_set vm dst
-            (Value.MInt (int_of_float (as_float vm (reg_get vm src))))
+            (Value.Int (int_of_float (to_float vm (reg_get vm src))))
 
         | Instr.Alloc (dst, tag, size) ->
           maybe_gc vm;
           let addr = guard_int vm (fun () -> H.alloc vm.heap ~size ~tag) in
-          if addr >= 0 then reg_set vm dst (Value.MPtr addr)
+          if addr >= 0 then reg_set vm dst (Value.Ptr addr)
 
         | Instr.GetField (dst, obj, field) ->
-          let addr = as_ptr vm (reg_get vm obj) in
+          let addr = to_ptr vm (reg_get vm obj) in
           let v    = guard vm (fun () -> H.read vm.heap addr field) in
           reg_set vm dst v
 
         | Instr.SetField (obj, field, src) ->
-          let addr = as_ptr vm (reg_get vm obj) in
+          let addr = to_ptr vm (reg_get vm obj) in
           let v    = reg_get vm src in
           guard_ vm (fun () -> H.write vm.heap addr field v)
 
@@ -370,51 +457,24 @@ module VM(H : Heap.HEAP_INTF)(T : VM_TRACER) : VM_INTF
           vm.pc <- target
 
         | Instr.Jz (reg, target) ->
-          if as_int vm (reg_get vm reg) = 0 then vm.pc <- target
+          if to_int vm (reg_get vm reg) = 0 then vm.pc <- target
 
         | Instr.Jnz (reg, target) ->
-          if as_int vm (reg_get vm reg) <> 0 then vm.pc <- target
+          if to_int vm (reg_get vm reg) <> 0 then vm.pc <- target
 
         | Instr.Call (target, arg_start, arg_end, ret_dst) ->
-          if vm.frame_sp >= Array.length vm.frames then
-            throw_code vm (Value.int_of_error Value.EStackOverflow)
-          else begin
-            T.on_call vm.tracer_ctx ~pc ~target;
-            let base = current_base vm in
-            vm.frames.(vm.frame_sp) <- {
-              return_pc = vm.pc;
-              ret_dst   = base + ret_dst;
-              reg_base  = base + arg_start;
-            };
-            vm.frame_sp <- vm.frame_sp + 1;
-            vm.pc       <- target;
-            ignore arg_end
-          end
+          do_call vm ~pc ~target ~arg_start ~arg_end ~ret_dst
+            ~program:(current_program vm)
 
         | Instr.TCall (target, arg_start, arg_end) ->
-          if vm.frame_sp = 0 then
-            fault vm "tail call from top level"
-          else begin
-            T.on_call vm.tracer_ctx ~pc ~target;
-            let base  = current_base vm in
-            let frame = vm.frames.(vm.frame_sp - 1) in
-            vm.frames.(vm.frame_sp - 1) <- {
-              frame with
-              reg_base = base + arg_start;
-            };
-            vm.pc <- target;
-            ignore arg_end
-          end
+          do_tcall vm ~pc ~target ~arg_start ~arg_end
+            ~program:(current_program vm)
 
-        | Instr.NCall (fn_reg, arg_start, arg_end, ret_dst) ->
-          (match reg_get vm fn_reg with
-           | Value.MNativeFn fn ->
-             let base   = current_base vm in
-             let args   = Array.sub vm.regs (base + arg_start)
-                            (arg_end - arg_start + 1) in
-             let result = guard vm (fun () -> fn args) in
-             reg_set vm ret_dst result
-           | _ -> fault vm "NCall: not a native function")
+        | Instr.DCall (fn_reg, arg_start, arg_end, ret_dst) ->
+          do_dcall vm ~pc ~fn_reg ~arg_start ~arg_end ~ret_dst
+
+        | Instr.TDCall (fn_reg, arg_start, arg_end) ->
+          do_tdcall vm ~pc ~fn_reg ~arg_start ~arg_end
 
         | Instr.Ret src ->
           if vm.frame_sp = 0 then
@@ -462,7 +522,7 @@ module VM(H : Heap.HEAP_INTF)(T : VM_TRACER) : VM_INTF
     vm.frame_sp   <- 0;
     vm.handler_sp <- 0;
     vm.status     <- Running;
-    Array.fill vm.regs 0 (Array.length vm.regs) Value.MNil
+    Array.fill vm.regs 0 (Array.length vm.regs) Value.Nil
 
   let is_done vm =
     match vm.status with
@@ -481,5 +541,5 @@ module VM(H : Heap.HEAP_INTF)(T : VM_TRACER) : VM_INTF
 
 end
 
-module FastVM  = VM(Heap.FastHeap)(NoVMTracer)
-module DebugVM = VM(Heap.DebugHeap)(FullVMTracer)
+module Fast  = Make(Heap.Fast)(No_tracer)
+module Debug = Make(Heap.Debug)(Full_tracer)

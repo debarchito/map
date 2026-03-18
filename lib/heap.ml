@@ -2,12 +2,12 @@ open Map_core
 
 type gen = Young | Old
 
-type gc_event =
-  | MinorStart
-  | MinorEnd   of { promoted : int }
-  | MajorMark  of { steps : int }
-  | MajorSweep of { steps : int; freed : int }
-  | MajorEnd
+type event =
+  | Minor_start
+  | Minor_end   of { promoted : int }
+  | Major_mark  of { steps : int }
+  | Major_sweep of { steps : int; freed : int }
+  | Major_end
 
 type stats = {
   young_used  : int;
@@ -28,19 +28,16 @@ type obj_info = {
   fields : Value.t array;
 }
 
-let tag_free    = 0
-let tag_forward = 1
-
-module type HEAP_TRACER = sig
+module type TRACER = sig
   type ctx
   val on_alloc      : ctx -> addr:int -> size:int -> tag:int -> unit
   val on_free       : ctx -> addr:int -> unit
   val on_promote    : ctx -> addr:int -> unit
-  val on_gc         : ctx -> gc_event -> unit
+  val on_gc         : ctx -> event -> unit
   val on_write_slot : ctx -> chunk_idx:int -> slot:int -> Value.t -> unit
 end
 
-module NoHeapTracer = struct
+module No_tracer = struct
   type ctx = unit
   let on_alloc      () ~addr:_ ~size:_ ~tag:_ = ()
   let on_free       () ~addr:_                = ()
@@ -49,17 +46,18 @@ module NoHeapTracer = struct
   let on_write_slot () ~chunk_idx:_ ~slot:_ _ = ()
 end
 
-module FullHeapTracer = struct
+module Full_tracer = struct
   type ctx = {
     mutable allocs   : (int * int * int) list;
     mutable frees    : int list;
     mutable promotes : int list;
-    mutable events   : gc_event list;
+    mutable events   : event list;
     metadata         : bytes;
     chunk_size       : int;
     sample_rate      : int;
     mutable tick     : int;
   }
+
   let make ~max_chunks ~chunk_size ~sample_rate =
     { allocs      = [];
       frees       = [];
@@ -69,24 +67,27 @@ module FullHeapTracer = struct
       chunk_size;
       sample_rate;
       tick        = 0 }
+
   let on_alloc      ctx ~addr ~size ~tag = ctx.allocs   <- (addr, size, tag) :: ctx.allocs
   let on_free       ctx ~addr            = ctx.frees    <- addr :: ctx.frees
   let on_promote    ctx ~addr            = ctx.promotes <- addr :: ctx.promotes
-  let on_gc         ctx event            = ctx.events   <- event :: ctx.events
+  let on_gc         ctx ev               = ctx.events   <- ev :: ctx.events
+
   let on_write_slot ctx ~chunk_idx ~slot v =
     ctx.tick <- ctx.tick + 1;
     if ctx.tick mod ctx.sample_rate = 0 then
       Bytes.set ctx.metadata (chunk_idx * ctx.chunk_size + slot)
         (match v with
-         | Value.MNil         -> '\x00'
-         | Value.MInt _       -> '\x01'
-         | Value.MFloat _     -> '\x02'
-         | Value.MPtr _       -> '\x03'
-         | Value.MNativePtr _ -> '\x04'
-         | Value.MNativeFn _  -> '\x05')
+         | Value.Nil         -> '\x00'
+         | Value.Int _       -> '\x01'
+         | Value.Float _     -> '\x02'
+         | Value.Ptr _       -> '\x03'
+         | Value.NativePtr _ -> '\x04'
+         | Value.NativeFun _ -> '\x05'
+         | Value.NativeFib _ -> '\x06')
 end
 
-module type HEAP_INTF = sig
+module type S = sig
   type tracer_ctx
 
   type chunk = {
@@ -99,7 +100,7 @@ module type HEAP_INTF = sig
 
   type t
 
-  val create                : Config.t -> tracer_ctx -> t
+  val create                : Config.Heap.t -> tracer_ctx -> t
   val alloc                 : t -> size:int -> tag:int -> int
   val alloc_old             : t -> size:int -> tag:int -> int
   val free_old              : t -> int -> unit
@@ -119,6 +120,7 @@ module type HEAP_INTF = sig
   val needs_minor_gc        : t -> bool
   val reset_young           : t -> unit
   val chunk_size            : t -> int
+  val on_gc                 : t -> event -> unit
   val iter_young_chunks     : t -> (int -> chunk -> unit) -> unit
   val iter_old_chunks       : t -> (int -> chunk -> unit) -> unit
   val iter_dirty_old_chunks : t -> (int -> chunk -> unit) -> unit
@@ -127,10 +129,13 @@ module type HEAP_INTF = sig
   val stats                 : t -> stats
   val inspect               : t -> int -> obj_info
   val tracer                : t -> tracer_ctx
-  val on_gc  : t -> gc_event -> unit
 end
 
-module Heap(H : HEAP_TRACER) : HEAP_INTF with type tracer_ctx = H.ctx = struct
+let log2 n =
+  let rec go acc x = if x = 1 then acc else go (acc + 1) (x lsr 1) in
+  go 0 n
+
+module Make(H : TRACER) : S with type tracer_ctx = H.ctx = struct
   type tracer_ctx = H.ctx
 
   type chunk = {
@@ -177,21 +182,21 @@ module Heap(H : HEAP_TRACER) : HEAP_INTF with type tracer_ctx = H.ctx = struct
     t.chunks.(ci).data.(s) <- v;
     H.on_write_slot t.tracer_ctx ~chunk_idx:ci ~slot:s v
 
-  let get_tag  t addr = Value.as_int (raw t (header_slot addr) hdr_tag_slot)
-  let get_size t addr = Value.as_int (raw t (header_slot addr) hdr_size_slot)
-  let get_mark t addr = Value.as_int (raw t (header_slot addr) hdr_mark_slot) <> 0
-  let get_fwd  t addr = Value.as_int (raw t (header_slot addr) hdr_fwd_slot)
+  let get_tag  t addr = Value.to_int (raw t (header_slot addr) hdr_tag_slot)
+  let get_size t addr = Value.to_int (raw t (header_slot addr) hdr_size_slot)
+  let get_mark t addr = Value.to_int (raw t (header_slot addr) hdr_mark_slot) <> 0
+  let get_fwd  t addr = Value.to_int (raw t (header_slot addr) hdr_fwd_slot)
 
-  let set_tag  t addr v = raw_set t (header_slot addr) hdr_tag_slot  (Value.MInt v)
-  let set_mark t addr v = raw_set t (header_slot addr) hdr_mark_slot (Value.MInt (if v then 1 else 0))
-  let set_fwd  t addr v = raw_set t (header_slot addr) hdr_fwd_slot  (Value.MInt v)
+  let set_tag  t addr v = raw_set t (header_slot addr) hdr_tag_slot  (Value.Int v)
+  let set_mark t addr v = raw_set t (header_slot addr) hdr_mark_slot (Value.Int (if v then 1 else 0))
+  let set_fwd  t addr v = raw_set t (header_slot addr) hdr_fwd_slot  (Value.Int v)
 
   let set_header t addr ~tag ~size =
     let hs = header_slot addr in
-    raw_set t hs hdr_tag_slot  (Value.MInt tag);
-    raw_set t hs hdr_size_slot (Value.MInt size);
-    raw_set t hs hdr_mark_slot (Value.MInt 0);
-    raw_set t hs hdr_fwd_slot  (Value.MInt (-1))
+    raw_set t hs hdr_tag_slot  (Value.Int tag);
+    raw_set t hs hdr_size_slot (Value.Int size);
+    raw_set t hs hdr_mark_slot (Value.Int 0);
+    raw_set t hs hdr_fwd_slot  (Value.Int (-1))
 
   let mark_card t addr =
     Bytes.set t.card_table (chunk_of t addr) '\001'
@@ -204,14 +209,14 @@ module Heap(H : HEAP_TRACER) : HEAP_INTF with type tracer_ctx = H.ctx = struct
 
   let write_barrier t addr value =
     match value with
-    | Value.MPtr _ | Value.MNativePtr _ ->
+    | Value.Ptr _ | Value.NativePtr _ ->
       if is_old t addr then mark_card t addr
     | _ -> ()
 
   let check_bounds t addr field =
     let sz = get_size t addr in
     if field < 0 || field >= sz then
-      raise (Value.EBoundsError
+      raise (Exception.Bounds_error
         (Printf.sprintf "heap field %d out of bounds (object size %d)" field sz))
 
   let read t addr field =
@@ -224,23 +229,14 @@ module Heap(H : HEAP_TRACER) : HEAP_INTF with type tracer_ctx = H.ctx = struct
     raw_set t addr field value
 
   let make_chunk size gen = {
-    data      = Array.make size Value.MNil;
+    data      = Array.make size Value.Nil;
     size;
     top       = 0;
     gen;
     free_list = -1;
   }
 
-  let is_power_of_two n = n > 0 && n land (n - 1) = 0
-
-  let log2 n =
-    let rec go acc x = if x = 1 then acc else go (acc + 1) (x lsr 1) in
-    go 0 n
-
-  let create (cfg : Config.t) ctx =
-    if not (is_power_of_two cfg.chunk_size) then
-      raise (Invalid_argument
-        (Printf.sprintf "chunk_size must be a power of two, got %d" cfg.chunk_size));
+  let create (cfg : Config.Heap.t) ctx =
     let shift = log2 cfg.chunk_size in
     let mask  = cfg.chunk_size - 1 in
     { chunks      = Array.init cfg.max_chunks (fun _ -> make_chunk cfg.chunk_size Young);
@@ -256,7 +252,7 @@ module Heap(H : HEAP_TRACER) : HEAP_INTF with type tracer_ctx = H.ctx = struct
 
   let add_chunk t gen =
     if t.n_chunks >= Array.length t.chunks then
-      raise (Value.EAllocError "heap exhausted: max_chunks reached");
+      raise (Exception.Alloc_error "heap exhausted: max_chunks reached");
     let c   = make_chunk t.chunk_size gen in
     let idx = t.n_chunks in
     t.chunks.(idx) <- c;
@@ -265,11 +261,11 @@ module Heap(H : HEAP_TRACER) : HEAP_INTF with type tracer_ctx = H.ctx = struct
 
   let alloc t ~size ~tag =
     if size <= 0 then
-      raise (Value.EAllocError
+      raise (Exception.Alloc_error
         (Printf.sprintf "alloc: size must be > 0, got %d" size));
     let needed = header_words + size in
     if needed > t.chunk_size then
-      raise (Value.EAllocError
+      raise (Exception.Alloc_error
         (Printf.sprintf "alloc: object size %d exceeds chunk_size %d" size t.chunk_size));
     let yc = t.chunks.(t.young) in
     if yc.top + needed > yc.size then begin
@@ -292,7 +288,7 @@ module Heap(H : HEAP_TRACER) : HEAP_INTF with type tracer_ctx = H.ctx = struct
       let cur = ref c.free_list in
       while !cur <> -1 do
         free_slots := !cur :: !free_slots;
-        cur := Value.as_int c.data.(!cur)
+        cur := Value.to_int c.data.(!cur)
       done;
       let arr = Array.of_list (List.sort compare !free_slots) in
       let n   = Array.length arr in
@@ -310,25 +306,25 @@ module Heap(H : HEAP_TRACER) : HEAP_INTF with type tracer_ctx = H.ctx = struct
           incr j
         done;
         let merged_size = !total - header_words in
-        set_header t addr ~tag:tag_free ~size:merged_size;
+        set_header t addr ~tag:Tag.free ~size:merged_size;
         arr.(!i) <- start;
         i := !j
       done;
       c.free_list <- -1;
       for k = n - 1 downto 0 do
         let slot = arr.(k) in
-        c.data.(slot) <- Value.MInt c.free_list;
+        c.data.(slot) <- Value.Int c.free_list;
         c.free_list   <- slot
       done
     end
 
   let alloc_old t ~size ~tag =
     if size <= 0 then
-      raise (Value.EAllocError
+      raise (Exception.Alloc_error
         (Printf.sprintf "alloc_old: size must be > 0, got %d" size));
     let needed = header_words + size in
     if needed > t.chunk_size then
-      raise (Value.EAllocError
+      raise (Exception.Alloc_error
         (Printf.sprintf "alloc_old: object size %d exceeds chunk_size %d" size t.chunk_size));
     let found = ref (-1) in
     let ci    = ref 0 in
@@ -341,17 +337,17 @@ module Heap(H : HEAP_TRACER) : HEAP_INTF with type tracer_ctx = H.ctx = struct
           let free_addr = !ci * t.chunk_size + !cur + header_words in
           let free_size = get_size t free_addr in
           if free_size >= size then begin
-            let next = Value.as_int c.data.(!cur) in
+            let next = Value.to_int c.data.(!cur) in
             if !prev = -1 then c.free_list    <- next
-            else               c.data.(!prev) <- Value.MInt next;
+            else               c.data.(!prev) <- Value.Int next;
             set_header t free_addr ~tag ~size;
             for i = 0 to size - 1 do
-              c.data.(!cur + header_words + i) <- Value.MNil
+              c.data.(!cur + header_words + i) <- Value.Nil
             done;
             found := free_addr
           end else begin
             prev := !cur;
-            cur  := Value.as_int c.data.(!cur)
+            cur  := Value.to_int c.data.(!cur)
           end
         done;
         if !found = -1 && c.free_list <> -1 then begin
@@ -361,15 +357,15 @@ module Heap(H : HEAP_TRACER) : HEAP_INTF with type tracer_ctx = H.ctx = struct
             let free_addr = !ci * t.chunk_size + !cur2 + header_words in
             let free_size = get_size t free_addr in
             if free_size >= size then begin
-              let next    = Value.as_int c.data.(!cur2) in
+              let next    = Value.to_int c.data.(!cur2) in
               c.free_list <- next;
               set_header t free_addr ~tag ~size;
               for i = 0 to size - 1 do
-                c.data.(!cur2 + header_words + i) <- Value.MNil
+                c.data.(!cur2 + header_words + i) <- Value.Nil
               done;
               found := free_addr
             end else
-              cur2 := Value.as_int c.data.(!cur2)
+              cur2 := Value.to_int c.data.(!cur2)
           done
         end
       end;
@@ -405,11 +401,11 @@ module Heap(H : HEAP_TRACER) : HEAP_INTF with type tracer_ctx = H.ctx = struct
     let c     = t.chunks.(c_idx) in
     let size  = get_size t addr in
     for i = 0 to size - 1 do
-      c.data.(s + i) <- Value.MNil
+      c.data.(s + i) <- Value.Nil
     done;
     let hdr_s      = s - header_words in
-    set_header t addr ~tag:tag_free ~size;
-    c.data.(hdr_s) <- Value.MInt c.free_list;
+    set_header t addr ~tag:Tag.free ~size;
+    c.data.(hdr_s) <- Value.Int c.free_list;
     c.free_list    <- hdr_s;
     H.on_free t.tracer_ctx ~addr
 
@@ -421,7 +417,7 @@ module Heap(H : HEAP_TRACER) : HEAP_INTF with type tracer_ctx = H.ctx = struct
       let c = t.chunks.(i) in
       if c.gen = Young then begin
         c.top <- 0;
-        Array.fill c.data 0 (Array.length c.data) Value.MNil
+        Array.fill c.data 0 (Array.length c.data) Value.Nil
       end
     done;
     t.alloc_count <- 0
@@ -450,7 +446,7 @@ module Heap(H : HEAP_TRACER) : HEAP_INTF with type tracer_ctx = H.ctx = struct
       let addr = ci * t.chunk_size + !pos + header_words in
       let tag  = get_tag  t addr in
       let size = get_size t addr in
-      if tag <> tag_free && tag <> tag_forward then f addr;
+      if tag <> Tag.free && tag <> Tag.forward then f addr;
       pos := !pos + header_words + size
     done
 
@@ -496,5 +492,5 @@ module Heap(H : HEAP_TRACER) : HEAP_INTF with type tracer_ctx = H.ctx = struct
   let on_gc t ev = H.on_gc t.tracer_ctx ev
 end
 
-module FastHeap  = Heap(NoHeapTracer)
-module DebugHeap = Heap(FullHeapTracer)
+module Fast  = Make(No_tracer)
+module Debug = Make(Full_tracer)

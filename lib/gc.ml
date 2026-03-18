@@ -4,23 +4,15 @@ type trigger =
   | Minor
   | Major
 
-type gc_state = {
-  mutable major_threshold : int;
-  major_growth_factor     : float;
-}
-
-module GC(H :Heap.HEAP_INTF) = struct
-
-  let make_state ~major_threshold ~major_growth_factor =
-    { major_threshold; major_growth_factor }
+module Make(H : Heap.S) = struct
 
   let is_young_ptr h v =
     match v with
-    | Value.MPtr addr -> H.is_young h addr
-    | _               -> false
+    | Value.Ptr addr -> H.is_young h addr
+    | _              -> false
 
   let promote h ~(promoted : int ref) addr =
-    if H.get_tag h addr = Heap.tag_forward then
+    if H.get_tag h addr = Tag.forward then
       H.get_fwd h addr
     else begin
       let tag  = H.get_tag  h addr in
@@ -29,7 +21,7 @@ module GC(H :Heap.HEAP_INTF) = struct
       for i = 0 to size - 1 do
         H.write h dst i (H.read h addr i)
       done;
-      H.set_tag h addr Heap.tag_forward;
+      H.set_tag h addr Tag.forward;
       H.set_fwd h addr dst;
       incr promoted;
       dst
@@ -38,26 +30,25 @@ module GC(H :Heap.HEAP_INTF) = struct
   let scan_object h ~promoted worklist addr =
     let size = H.get_size h addr in
     for i = 0 to size - 1 do
-      let v = H.read h addr i in
-      match v with
-      | Value.MPtr child when H.is_young h child ->
+      match H.read h addr i with
+      | Value.Ptr child when H.is_young h child ->
         let new_child = promote h ~promoted child in
-        H.write h addr i (Value.MPtr new_child);
+        H.write h addr i (Value.Ptr new_child);
         Queue.push new_child worklist
-      | Value.MPtr child when H.get_tag h child = Heap.tag_forward ->
-        H.write h addr i (Value.MPtr (H.get_fwd h child))
+      | Value.Ptr child when H.get_tag h child = Tag.forward ->
+        H.write h addr i (Value.Ptr (H.get_fwd h child))
       | _ -> ()
     done
 
   let fix_roots h ~promoted worklist roots =
     for i = 0 to Array.length roots - 1 do
       match roots.(i) with
-      | Value.MPtr addr when H.is_young h addr ->
+      | Value.Ptr addr when H.is_young h addr ->
         let new_addr = promote h ~promoted addr in
-        roots.(i)   <- Value.MPtr new_addr;
+        roots.(i)   <- Value.Ptr new_addr;
         Queue.push new_addr worklist
-      | Value.MPtr addr when H.get_tag h addr = Heap.tag_forward ->
-        roots.(i) <- Value.MPtr (H.get_fwd h addr)
+      | Value.Ptr addr when H.get_tag h addr = Tag.forward ->
+        roots.(i) <- Value.Ptr (H.get_fwd h addr)
       | _ -> ()
     done
 
@@ -66,8 +57,8 @@ module GC(H :Heap.HEAP_INTF) = struct
       scan_object h ~promoted worklist (Queue.pop worklist)
     done
 
-  let minor h (gc : gc_state) ~roots =
-    H.on_gc h Heap.MinorStart;
+  let minor h (cfg : Config.Gc.t) ~roots =
+    H.on_gc h Heap.Minor_start;
     let promoted = ref 0 in
     let worklist = Queue.create () in
     fix_roots h ~promoted worklist roots;
@@ -76,14 +67,13 @@ module GC(H :Heap.HEAP_INTF) = struct
       H.iter_chunk_objects h ci (fun addr ->
         let size = H.get_size h addr in
         for i = 0 to size - 1 do
-          let v = H.read h addr i in
-          match v with
-          | Value.MPtr child when H.is_young h child ->
+          match H.read h addr i with
+          | Value.Ptr child when H.is_young h child ->
             let new_child = promote h ~promoted child in
-            H.write h addr i (Value.MPtr new_child);
+            H.write h addr i (Value.Ptr new_child);
             Queue.push new_child worklist
-          | Value.MPtr child when H.get_tag h child = Heap.tag_forward ->
-            H.write h addr i (Value.MPtr (H.get_fwd h child))
+          | Value.Ptr child when H.get_tag h child = Tag.forward ->
+            H.write h addr i (Value.Ptr (H.get_fwd h child))
           | _ -> ()
         done
       );
@@ -91,9 +81,9 @@ module GC(H :Heap.HEAP_INTF) = struct
       drain h ~promoted worklist
     );
     H.reset_young h;
-    H.on_gc h (Heap.MinorEnd { promoted = !promoted });
+    H.on_gc h (Heap.Minor_end { promoted = !promoted });
     let s = H.stats h in
-    if s.old_used >= gc.major_threshold then Some Major
+    if s.old_used >= cfg.major_threshold then Some Major
     else None
 
   let mark h ~roots =
@@ -101,7 +91,7 @@ module GC(H :Heap.HEAP_INTF) = struct
     let stack = Stack.create () in
     let push v =
       match v with
-      | Value.MPtr addr when H.is_old h addr && not (H.get_mark h addr) ->
+      | Value.Ptr addr when H.is_old h addr && not (H.get_mark h addr) ->
         H.set_mark h addr true;
         Stack.push addr stack
       | _ -> ()
@@ -133,18 +123,18 @@ module GC(H :Heap.HEAP_INTF) = struct
     );
     (!steps, !freed)
 
-  let major h (gc : gc_state) ~roots =
+  let major h (cfg : Config.Gc.t) ~roots =
     let mark_steps           = mark h ~roots in
-    H.on_gc h (Heap.MajorMark { steps = mark_steps });
+    H.on_gc h (Heap.Major_mark { steps = mark_steps });
     let (sweep_steps, freed) = sweep h in
-    H.on_gc h (Heap.MajorSweep { steps = sweep_steps; freed });
-    H.on_gc h Heap.MajorEnd;
+    H.on_gc h (Heap.Major_sweep { steps = sweep_steps; freed });
+    H.on_gc h Heap.Major_end;
     let s = H.stats h in
-    gc.major_threshold <-
-      int_of_float (float_of_int s.old_used *. gc.major_growth_factor)
+    cfg.major_threshold <-
+      int_of_float (float_of_int s.old_used *. cfg.major_growth_factor)
 
-  let run h gc ~roots = function
-    | Minor -> minor h gc ~roots
-    | Major -> major h gc ~roots; None
+  let run h cfg ~roots = function
+    | Minor -> minor h cfg ~roots
+    | Major -> major h cfg ~roots; None
 
 end

@@ -1,7 +1,7 @@
 (executable
  (public_name map)
  (name main)
- (libraries unix map)
+ (libraries unix raylib map)
  (modules
   ; parser
   main))

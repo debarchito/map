@@ -11,6 +11,7 @@ depends: [
   "dune" {>= "3.21"}
   "ocaml" {>= "5.4.1"}
   "menhir" {>= "20260209"}
+  "raylib"
   "odoc" {with-doc}
 ]
 build: [
