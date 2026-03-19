@@ -1,4 +1,4 @@
 (library
- (name map_std)
- (libraries map_core map raylib)
- (modules math gui))
+ (name std)
+ (libraries core map raylib)
+ (modules mstring math gui))

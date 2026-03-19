@@ -1,4 +1,4 @@
-open Map_core
+open Core
 
 let bytecode_id : Instr.t array Type.Id.t = Type.Id.make ()
 
@@ -61,6 +61,7 @@ module type S = sig
   val set_reg    : t -> int -> Value.t -> unit
   val get_status : t -> string
   val heap       : t -> heap_t
+  val set_const : t -> int -> Value.t -> unit
 end
 
 module Make(H : Heap.S)(T : TRACER) : S
@@ -599,6 +600,8 @@ module Make(H : Heap.S)(T : TRACER) : S
     | Running  -> "running"
     | Halted   -> "halted"
     | Fault  m -> Printf.sprintf "fault: %s" m
+
+  let set_const vm i v = vm.constants.(i) <- v
 
 end
 

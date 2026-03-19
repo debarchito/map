@@ -1,4 +1,4 @@
-open Map_core
+open Core
 
 let ns =
   let open Map.Namespace in

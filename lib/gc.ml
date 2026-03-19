@@ -1,4 +1,6 @@
-open Map_core
+open Core
+
+module Heap = Sigs.Heap
 
 type trigger =
   | Minor

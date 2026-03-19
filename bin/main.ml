@@ -1,58 +1,78 @@
-open Map_core
+open Core
 open Map.Instr
 
 let cfg = Config.default
 
-let prelude = Map.Namespace.(prepare (ns "root" [
-  ns "std" [
-    Map_std.Math.ns;
-    Map_std.Gui.ns;
-  ];
-]))
+module NsDebug      = Map.Namespace.Make(Map.Heap.Debug)
+module GuiDebug     = Std.Gui.Make(Map.Heap.Debug)
+module MstringDebug = Std.Mstring.Make(Map.Heap.Debug)
 
-let program = [|
-  (*  0 *) GetField (1, 0, prelude.i "std");
-  (*  1 *) GetField (1, 1, prelude.i "std/gui");
-  (*  2 *) Load     (7, 800);
-  (*  3 *) Load     (8, 450);
-  (*  4 *) GetField (2, 1, prelude.i "std/gui/init_window");
-  (*  5 *) DCall    (2, 7, 8, 9);
-  (*  6 *) GetField (3, 0, prelude.i "std");
-  (*  7 *) GetField (3, 3, prelude.i "std/math");
-  (*  8 *) GetField (2, 3, prelude.i "std/math/abs");
-  (*  9 *) LoadF    (10, -17.0);
-  (* 10 *) DCall    (2, 10, 10, 11);
-  (* 11 *) GetField (2, 1, prelude.i "std/gui/window_should_close");
-  (* 12 *) DCall    (2, 7, 7, 9);
-  (* 13 *) Jnz      (9, 26);
-  (* 14 *) GetField (2, 1, prelude.i "std/gui/begin_drawing");
-  (* 15 *) DCall    (2, 7, 7, 9);
-  (* 16 *) GetField (2, 1, prelude.i "std/gui/clear_background");
-  (* 17 *) DCall    (2, 7, 7, 9);
-  (* 18 *) Load     (12, 150);
-  (* 19 *) Load     (13, 180);
-  (* 20 *) Load     (14, 28);
-  (* 21 *) GetField (2, 1, prelude.i "std/gui/draw_float");
-  (* 22 *) DCall    (2, 10, 14, 9);
-  (* 23 *) GetField (2, 1, prelude.i "std/gui/end_drawing");
-  (* 24 *) DCall    (2, 7, 7, 9);
-  (* 25 *) Jmp      11;
-  (* 26 *) GetField (2, 1, prelude.i "std/gui/close_window");
-  (* 27 *) DCall    (2, 7, 7, 9);
-  (* 28 *) Halt;
-|]
-
-module Ns      = Map.Namespace.Make(Map.Heap.Fast)
-module NsDebug = Map.Namespace.Make(Map.Heap.Debug)
+let program = Array.make 46 Nop
 
 let () =
-  let tc  = Map.Vm.Full_tracer.make () in
-  let hc  = Map.Heap.Full_tracer.make
-              ~max_chunks:cfg.Config.heap.max_chunks
-              ~chunk_size:cfg.Config.heap.chunk_size
-              ~sample_rate:1 in
-  let vm  = Map.Vm.Debug.create cfg program hc tc in
-  let ptr = NsDebug.load (Map.Vm.Debug.heap vm) prelude.tree in
+  let tc   = Map.Vm.Full_tracer.make () in
+  let hc   = Map.Heap.Full_tracer.make
+               ~max_chunks:cfg.Config.heap.max_chunks
+               ~chunk_size:cfg.Config.heap.chunk_size
+               ~sample_rate:1 in
+  let vm   = Map.Vm.Debug.create cfg program hc tc in
+  let heap = Map.Vm.Debug.heap vm in
+
+  let prelude = Map.Namespace.(prepare (ns "root" [
+    ns "std" [
+      Std.Math.ns;
+      GuiDebug.ns heap;
+      MstringDebug.ns heap;
+    ];
+  ])) in
+
+  Map.Vm.Debug.set_const vm 0 (MstringDebug.alloc_string heap "Map Window");
+  Map.Vm.Debug.set_const vm 1 (MstringDebug.alloc_string heap "(assert (abs %g) %g) ; #t");
+
+  let p = program in
+  (*  0 *) p.(0)  <- GetField (1,  0,  prelude.i "std");
+  (*  1 *) p.(1)  <- GetField (2,  1,  prelude.i "std/gui");
+  (*  2 *) p.(2)  <- GetField (3,  1,  prelude.i "std/math");
+  (*  3 *) p.(3)  <- GetField (4,  2,  prelude.i "std/gui/init_window");
+  (*  4 *) p.(4)  <- Load     (5,  800);
+  (*  5 *) p.(5)  <- Load     (6,  450);
+  (*  6 *) p.(6)  <- LoadK    (7,  0);
+  (*  7 *) p.(7)  <- DCall    (4,  5,  7,  8);
+  (*  8 *) p.(8)  <- GetField (9,  3,  prelude.i "std/math/abs");
+  (*  9 *) p.(9)  <- LoadF    (10, -17.0);
+  (* 10 *) p.(10) <- DCall    (9,  10, 10, 11);
+  (* 11 *) p.(11) <- GetField (20, 2,  prelude.i "std/gui/window_should_close");
+  (* 12 *) p.(12) <- DCall    (20, 5,  5,  21);
+  (* 13 *) p.(13) <- Jnz      (21, 42);
+  (* 14 *) p.(14) <- GetField (20, 2,  prelude.i "std/gui/begin_drawing");
+  (* 15 *) p.(15) <- DCall    (20, 5,  5,  8);
+  (* 16 *) p.(16) <- GetField (20, 2,  prelude.i "std/gui/clear_background");
+  (* 17 *) p.(17) <- Load     (22, 245);
+  (* 18 *) p.(18) <- Load     (23, 245);
+  (* 19 *) p.(19) <- Load     (24, 245);
+  (* 20 *) p.(20) <- Load     (25, 255);
+  (* 21 *) p.(21) <- DCall    (20, 22, 25, 8);
+  (* 22 *) p.(22) <- GetField (40, 1,  prelude.i "std/string");
+  (* 23 *) p.(23) <- GetField (32, 40, prelude.i "std/string/format");
+  (* 24 *) p.(24) <- LoadK    (33, 1);   (* r33 = fmt *)
+  (* 25 *) p.(25) <- Mov      (34, 10);  (* r34 = input -17.0 *)
+  (* 26 *) p.(26) <- Mov      (35, 11);  (* r35 = result 17.0 *)
+  (* 27 *) p.(27) <- DCall    (32, 33, 35, 34); (* format(r33=fmt, r34=input, r35=result) -> r34 *)
+  (* 28 *) p.(28) <- GetField (20, 2,  prelude.i "std/gui/draw_text");
+  (* 29 *) p.(29) <- Load     (35, 150);
+  (* 30 *) p.(30) <- Load     (36, 180);
+  (* 31 *) p.(31) <- Load     (37, 28);
+  (* 32 *) p.(32) <- DCall    (20, 34, 37, 8);
+  (* 33 *) p.(33) <- Load     (37, 28);
+  (* 34 *) p.(34) <- DCall    (20, 34, 37, 8);
+  (* 35 *) p.(35) <- GetField (20, 2,  prelude.i "std/gui/end_drawing");
+  (* 36 *) p.(36) <- DCall    (20, 5,  5,  8);
+  (* 37 *) p.(37) <- Jmp      11;
+  (* 42 *) p.(42) <- GetField (20, 2,  prelude.i "std/gui/close_window");
+  (* 43 *) p.(43) <- DCall    (20, 5,  5,  8);
+  (* 44 *) p.(44) <- Halt;
+
+  let ptr = NsDebug.load heap prelude.tree in
   Map.Vm.Debug.set_reg vm 0 ptr;
   Map.Vm.Debug.run vm;
 
@@ -90,11 +110,11 @@ let () =
    | [] -> Printf.printf "  (none)\n"
    | es -> List.iter (fun ev ->
        let s = match ev with
-         | Map.Heap.Minor_start                     -> "MinorStart"
-         | Map.Heap.Minor_end { promoted }          -> Printf.sprintf "MinorEnd promoted=%d" promoted
-         | Map.Heap.Major_mark { steps }            -> Printf.sprintf "MajorMark steps=%d" steps
-         | Map.Heap.Major_sweep { steps; freed }    -> Printf.sprintf "MajorSweep steps=%d freed=%d" steps freed
-         | Map.Heap.Major_end                       -> "MajorEnd"
+         | Map.Heap.Minor_start                  -> "MinorStart"
+         | Map.Heap.Minor_end { promoted }       -> Printf.sprintf "MinorEnd promoted=%d" promoted
+         | Map.Heap.Major_mark { steps }         -> Printf.sprintf "MajorMark steps=%d" steps
+         | Map.Heap.Major_sweep { steps; freed } -> Printf.sprintf "MajorSweep steps=%d freed=%d" steps freed
+         | Map.Heap.Major_end                    -> "MajorEnd"
        in
        Printf.printf "  %s\n" s
      ) (List.rev es));
