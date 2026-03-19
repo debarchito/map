@@ -21,7 +21,8 @@
    (>= "5.4.1"))
   (menhir
    (>= "20260209"))
-  raylib)
+  (raylib
+   (>= "1.6.0")))
  (tags ("lisp")))
 
 (using menhir 3.0)

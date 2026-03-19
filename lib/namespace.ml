@@ -9,19 +9,21 @@ type t =
   | Node of string * t list
 
 type indexed = {
-  tree : t;
-  i    : string -> int;
+  tree  : t;
+  i     : string -> int;
+  count : int;
 }
 
 let name_of = function
   | Leaf (n, _) -> n
   | Node (n, _) -> n
 
-let ns name children          = Node (name, children)
-let fn name v                 = Leaf (name, Fun v)
-let bytecode name code consts = Leaf (name, Bytecode (code, consts))
+let ns   name children          = Node (name, children)
+let native  name v              = Leaf (name, Fun v)
+let fn   name f                 = Leaf (name, Fun (Value.NativeFun f))
+let bytecode name code consts   = Leaf (name, Bytecode (code, consts))
 
-let index root =
+let prepare root =
   let tbl = Hashtbl.create 64 in
   let rec walk path = function
     | Leaf _ -> ()
@@ -33,11 +35,12 @@ let index root =
       ) children
   in
   walk "" root;
-  { tree = root;
+  { tree  = root;
+    count = Hashtbl.length tbl;
     i = fun path ->
       match Hashtbl.find_opt tbl path with
       | Some i -> i
-      | None   -> failwith (Printf.sprintf "Namespace.index: '%s' not found" path) }
+      | None   -> failwith (Printf.sprintf "Map.Namespace.prepare: '%s' not found" path) }
 
 module Make(H : Heap.S) = struct
 
@@ -113,11 +116,13 @@ module Make(H : Heap.S) = struct
 
   let pp ns =
     let rec walk indent = function
-      | Leaf (name, Fun _)      ->
+      | Leaf (name, Fun (Value.NativeFun _)) ->
         Printf.printf "%s%s  [NativeFun]\n" indent name
+      | Leaf (name, Fun v) ->
+        Printf.printf "%s%s  [%s]\n" indent name (Value.to_string v)
       | Leaf (name, Bytecode _) ->
         Printf.printf "%s%s  [Bytecode]\n" indent name
-      | Node (name, children)   ->
+      | Node (name, children) ->
         Printf.printf "%s%s/\n" indent name;
         List.iter (walk (indent ^ "  ")) children
     in

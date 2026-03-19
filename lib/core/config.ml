@@ -64,11 +64,13 @@ module Scheduler = struct
   type t = {
     fiber_quantum       : int;
     max_fibers          : int;
+    max_call_depth      : int;
   }
 
   let default = {
     fiber_quantum       = 1000;
     max_fibers          = 1024;
+    max_call_depth      = 512;
   }
 
   let validate t =

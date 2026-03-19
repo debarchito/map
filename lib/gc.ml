@@ -6,11 +6,6 @@ type trigger =
 
 module Make(H : Heap.S) = struct
 
-  let is_young_ptr h v =
-    match v with
-    | Value.Ptr addr -> H.is_young h addr
-    | _              -> false
-
   let promote h ~(promoted : int ref) addr =
     if H.get_tag h addr = Tag.forward then
       H.get_fwd h addr
@@ -21,7 +16,6 @@ module Make(H : Heap.S) = struct
       for i = 0 to size - 1 do
         H.write h dst i (H.read h addr i)
       done;
-      H.set_tag h addr Tag.forward;
       H.set_fwd h addr dst;
       incr promoted;
       dst
@@ -40,17 +34,19 @@ module Make(H : Heap.S) = struct
       | _ -> ()
     done
 
-  let fix_roots h ~promoted worklist roots =
-    for i = 0 to Array.length roots - 1 do
-      match roots.(i) with
-      | Value.Ptr addr when H.is_young h addr ->
-        let new_addr = promote h ~promoted addr in
-        roots.(i)   <- Value.Ptr new_addr;
-        Queue.push new_addr worklist
-      | Value.Ptr addr when H.get_tag h addr = Tag.forward ->
-        roots.(i) <- Value.Ptr (H.get_fwd h addr)
-      | _ -> ()
-    done
+  let fix_roots h ~promoted worklist (roots : Value.t array array) =
+    Array.iter (fun root_set ->
+      for i = 0 to Array.length root_set - 1 do
+        match root_set.(i) with
+        | Value.Ptr addr when H.is_young h addr ->
+          let new_addr = promote h ~promoted addr in
+          root_set.(i) <- Value.Ptr new_addr;
+          Queue.push new_addr worklist
+        | Value.Ptr addr when H.get_tag h addr = Tag.forward ->
+          root_set.(i) <- Value.Ptr (H.get_fwd h addr)
+        | _ -> ()
+      done
+    ) roots
 
   let drain h ~promoted worklist =
     while not (Queue.is_empty worklist) do
@@ -62,33 +58,22 @@ module Make(H : Heap.S) = struct
     let promoted = ref 0 in
     let worklist = Queue.create () in
     fix_roots h ~promoted worklist roots;
-    drain h ~promoted worklist;
     H.iter_dirty_old_chunks h (fun ci _chunk ->
       H.iter_chunk_objects h ci (fun addr ->
-        let size = H.get_size h addr in
-        for i = 0 to size - 1 do
-          match H.read h addr i with
-          | Value.Ptr child when H.is_young h child ->
-            let new_child = promote h ~promoted child in
-            H.write h addr i (Value.Ptr new_child);
-            Queue.push new_child worklist
-          | Value.Ptr child when H.get_tag h child = Tag.forward ->
-            H.write h addr i (Value.Ptr (H.get_fwd h child))
-          | _ -> ()
-        done
+        scan_object h ~promoted worklist addr
       );
-      H.clear_card h ci;
-      drain h ~promoted worklist
+      H.clear_card h ci
     );
+    drain h ~promoted worklist;
     H.reset_young h;
     H.on_gc h (Heap.Minor_end { promoted = !promoted });
     let s = H.stats h in
     if s.old_used >= cfg.major_threshold then Some Major
     else None
 
-  let mark h ~roots =
+  let mark h ~(roots : Value.t array array) =
     let steps = ref 0 in
-    let stack = Stack.create () in
+    let stack  = Stack.create () in
     let push v =
       match v with
       | Value.Ptr addr when H.is_old h addr && not (H.get_mark h addr) ->
@@ -96,7 +81,7 @@ module Make(H : Heap.S) = struct
         Stack.push addr stack
       | _ -> ()
     in
-    Array.iter push roots;
+    Array.iter (fun root_set -> Array.iter push root_set) roots;
     while not (Stack.is_empty stack) do
       let addr = Stack.pop stack in
       incr steps;
@@ -110,8 +95,8 @@ module Make(H : Heap.S) = struct
   let sweep h =
     let steps = ref 0 in
     let freed = ref 0 in
-    H.iter_objects h (fun addr ->
-      if H.is_old h addr then begin
+    H.iter_old_chunks h (fun ci _chunk ->
+      H.iter_chunk_objects h ci (fun addr ->
         incr steps;
         if H.get_mark h addr then
           H.set_mark h addr false
@@ -119,7 +104,7 @@ module Make(H : Heap.S) = struct
           H.free_old h addr;
           incr freed
         end
-      end
+      )
     );
     (!steps, !freed)
 
@@ -131,7 +116,8 @@ module Make(H : Heap.S) = struct
     H.on_gc h Heap.Major_end;
     let s = H.stats h in
     cfg.major_threshold <-
-      int_of_float (float_of_int s.old_used *. cfg.major_growth_factor)
+      max cfg.major_threshold
+        (int_of_float (float_of_int s.old_used *. cfg.major_growth_factor))
 
   let run h cfg ~roots = function
     | Minor -> minor h cfg ~roots

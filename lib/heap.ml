@@ -89,17 +89,14 @@ end
 
 module type S = sig
   type tracer_ctx
-
   type chunk = {
     data              : Value.t array;
     size              : int;
     mutable top       : int;
     gen               : gen;
-    mutable free_list : int;
+    mutable free_list : int array;
   }
-
   type t
-
   val create                : Config.Heap.t -> tracer_ctx -> t
   val alloc                 : t -> size:int -> tag:int -> int
   val alloc_old             : t -> size:int -> tag:int -> int
@@ -138,12 +135,29 @@ let log2 n =
 module Make(H : TRACER) : S with type tracer_ctx = H.ctx = struct
   type tracer_ctx = H.ctx
 
+  let num_classes   = 10
+  let header_words  = 1
+  let min_free_size = 3
+
+  let size_class sz =
+    match sz with
+    | 2 | 3             -> 0
+    | 4                 -> 1
+    | 5 | 6             -> 2
+    | 7 | 8             -> 3
+    | n when n <= 16    -> 4
+    | n when n <= 32    -> 5
+    | n when n <= 64    -> 6
+    | n when n <= 128   -> 7
+    | n when n <= 256   -> 8
+    | _                 -> 9
+
   type chunk = {
     data              : Value.t array;
     size              : int;
     mutable top       : int;
     gen               : gen;
-    mutable free_list : int;
+    mutable free_list : int array;
   }
 
   type t = {
@@ -159,81 +173,87 @@ module Make(H : TRACER) : S with type tracer_ctx = H.ctx = struct
     tracer_ctx          : H.ctx;
   }
 
-  let header_words  = 4
-  let hdr_tag_slot  = 0
-  let hdr_size_slot = 1
-  let hdr_mark_slot = 2
-  let hdr_fwd_slot  = 3
-
   let chunk_of t addr = addr lsr t.chunk_shift
   let slot_of  t addr = addr land t.chunk_mask
-
   let is_young t addr = t.chunks.(chunk_of t addr).gen = Young
   let is_old   t addr = t.chunks.(chunk_of t addr).gen = Old
 
-  let header_slot addr = addr - header_words
+  let encode_header ~tag ~size ~mark =
+    (size lsl 10) lor (tag lsl 2) lor (if mark then 2 else 0)
 
-  let raw t addr slot =
-    t.chunks.(chunk_of t addr).data.(slot_of t addr + slot)
+  let get_raw_header t addr =
+    let c = t.chunks.(chunk_of t addr) in
+    let s = slot_of t addr - header_words in
+    match c.data.(s) with
+    | Value.Int h -> h
+    | _           -> raise (Exception.Alloc_error "heap: corrupted object header")
 
-  let raw_set t addr slot v =
+  let get_tag  t addr = (get_raw_header t addr lsr 2) land 0xFF
+  let get_size t addr =  get_raw_header t addr lsr 10
+  let get_mark t addr = (get_raw_header t addr land 2) <> 0
+
+  let get_fwd t addr =
+    if get_tag t addr = Tag.forward then
+      match t.chunks.(chunk_of t addr).data.(slot_of t addr) with
+      | Value.Int f -> f
+      | _           -> -1
+    else -1
+
+  let set_raw_header t addr h =
     let ci = chunk_of t addr in
-    let s  = slot_of  t addr + slot in
-    t.chunks.(ci).data.(s) <- v;
-    H.on_write_slot t.tracer_ctx ~chunk_idx:ci ~slot:s v
+    let s  = slot_of t addr - header_words in
+    t.chunks.(ci).data.(s) <- Value.Int h;
+    H.on_write_slot t.tracer_ctx ~chunk_idx:ci ~slot:s (Value.Int h)
 
-  let get_tag  t addr = Value.to_int (raw t (header_slot addr) hdr_tag_slot)
-  let get_size t addr = Value.to_int (raw t (header_slot addr) hdr_size_slot)
-  let get_mark t addr = Value.to_int (raw t (header_slot addr) hdr_mark_slot) <> 0
-  let get_fwd  t addr = Value.to_int (raw t (header_slot addr) hdr_fwd_slot)
+  let set_header t addr ~tag ~size ~mark =
+    set_raw_header t addr (encode_header ~tag ~size ~mark)
 
-  let set_tag  t addr v = raw_set t (header_slot addr) hdr_tag_slot  (Value.Int v)
-  let set_mark t addr v = raw_set t (header_slot addr) hdr_mark_slot (Value.Int (if v then 1 else 0))
-  let set_fwd  t addr v = raw_set t (header_slot addr) hdr_fwd_slot  (Value.Int v)
+  let set_tag  t addr v =
+    set_header t addr ~tag:v ~size:(get_size t addr) ~mark:(get_mark t addr)
 
-  let set_header t addr ~tag ~size =
-    let hs = header_slot addr in
-    raw_set t hs hdr_tag_slot  (Value.Int tag);
-    raw_set t hs hdr_size_slot (Value.Int size);
-    raw_set t hs hdr_mark_slot (Value.Int 0);
-    raw_set t hs hdr_fwd_slot  (Value.Int (-1))
+  let set_mark t addr v =
+    set_header t addr ~tag:(get_tag t addr) ~size:(get_size t addr) ~mark:v
 
-  let mark_card t addr =
-    Bytes.set t.card_table (chunk_of t addr) '\001'
+  let set_fwd t addr v =
+    set_header t addr ~tag:Tag.forward ~size:(get_size t addr) ~mark:(get_mark t addr);
+    let ci = chunk_of t addr in
+    let s  = slot_of t addr in
+    t.chunks.(ci).data.(s) <- Value.Int v;
+    H.on_write_slot t.tracer_ctx ~chunk_idx:ci ~slot:s (Value.Int v)
 
-  let clear_card t chunk_idx =
-    Bytes.set t.card_table chunk_idx '\000'
-
-  let is_card_dirty t chunk_idx =
-    Bytes.get t.card_table chunk_idx <> '\000'
+  let mark_card     t addr = Bytes.set t.card_table (chunk_of t addr) '\001'
+  let clear_card    t ci   = Bytes.set t.card_table ci '\000'
+  let is_card_dirty t ci   = Bytes.get t.card_table ci <> '\000'
 
   let write_barrier t addr value =
     match value with
-    | Value.Ptr _ | Value.NativePtr _ ->
-      if is_old t addr then mark_card t addr
+    | Value.Ptr _ | Value.NativePtr _ -> if is_old t addr then mark_card t addr
     | _ -> ()
 
   let check_bounds t addr field =
     let sz = get_size t addr in
     if field < 0 || field >= sz then
       raise (Exception.Bounds_error
-        (Printf.sprintf "heap field %d out of bounds (object size %d)" field sz))
+        (Printf.sprintf "heap field %d out of bounds (size %d)" field sz))
 
   let read t addr field =
     check_bounds t addr field;
-    raw t addr field
+    t.chunks.(chunk_of t addr).data.(slot_of t addr + field)
 
   let write t addr field value =
     check_bounds t addr field;
     write_barrier t addr value;
-    raw_set t addr field value
+    let ci = chunk_of t addr in
+    let s  = slot_of t addr + field in
+    t.chunks.(ci).data.(s) <- value;
+    H.on_write_slot t.tracer_ctx ~chunk_idx:ci ~slot:s value
 
   let make_chunk size gen = {
     data      = Array.make size Value.Nil;
     size;
     top       = 0;
     gen;
-    free_list = -1;
+    free_list = Array.make num_classes (-1);
   }
 
   let create (cfg : Config.Heap.t) ctx =
@@ -253,121 +273,92 @@ module Make(H : TRACER) : S with type tracer_ctx = H.ctx = struct
   let add_chunk t gen =
     if t.n_chunks >= Array.length t.chunks then
       raise (Exception.Alloc_error "heap exhausted: max_chunks reached");
-    let c   = make_chunk t.chunk_size gen in
     let idx = t.n_chunks in
-    t.chunks.(idx) <- c;
+    t.chunks.(idx) <- make_chunk t.chunk_size gen;
     t.n_chunks     <- t.n_chunks + 1;
     idx
 
+  let fl_get_next (c : chunk) slot =
+    match c.data.(slot + 1) with Value.Int n -> n | _ -> -1
+
+  let fl_get_prev (c : chunk) slot =
+    match c.data.(slot + 2) with Value.Int n -> n | _ -> -1
+
+  let fl_set_next (c : chunk) slot v = c.data.(slot + 1) <- Value.Int v
+  let fl_set_prev (c : chunk) slot v = c.data.(slot + 2) <- Value.Int v
+
+  let fl_insert (c : chunk) cls slot size =
+    c.data.(slot) <- Value.Int (encode_header ~tag:Tag.free ~size ~mark:false);
+    c.data.(slot + size) <- Value.Int size;
+    let old_head = c.free_list.(cls) in
+    fl_set_next c slot old_head;
+    fl_set_prev c slot (-1);
+    if old_head <> -1 then fl_set_prev c old_head slot;
+    c.free_list.(cls) <- slot
+
+  let fl_remove (c : chunk) cls slot =
+    let next = fl_get_next c slot in
+    let prev = fl_get_prev c slot in
+    if prev = -1 then c.free_list.(cls) <- next
+    else fl_set_next c prev next;
+    if next <> -1 then fl_set_prev c next prev
+
   let alloc t ~size ~tag =
-    if size <= 0 then
-      raise (Exception.Alloc_error
-        (Printf.sprintf "alloc: size must be > 0, got %d" size));
+    let size   = max min_free_size size in
     let needed = header_words + size in
     if needed > t.chunk_size then
       raise (Exception.Alloc_error
-        (Printf.sprintf "alloc: object size %d exceeds chunk_size %d" size t.chunk_size));
+        (Printf.sprintf "alloc: size %d exceeds chunk_size" size));
     let yc = t.chunks.(t.young) in
-    if yc.top + needed > yc.size then begin
-      let idx = add_chunk t Young in
-      t.young <- idx
-    end;
+    if yc.top + needed > yc.size then
+      t.young <- add_chunk t Young;
     let yc   = t.chunks.(t.young) in
     let addr = t.young * t.chunk_size + yc.top + header_words in
-    set_header t addr ~tag ~size;
+    set_header t addr ~tag ~size ~mark:false;
     yc.top        <- yc.top + needed;
     t.alloc_count <- t.alloc_count + 1;
     H.on_alloc t.tracer_ctx ~addr ~size ~tag;
     addr
 
-  let coalesce_chunk t ci =
-    let c = t.chunks.(ci) in
-    if c.free_list = -1 then ()
-    else begin
-      let free_slots = ref [] in
-      let cur = ref c.free_list in
-      while !cur <> -1 do
-        free_slots := !cur :: !free_slots;
-        cur := Value.to_int c.data.(!cur)
-      done;
-      let arr = Array.of_list (List.sort compare !free_slots) in
-      let n   = Array.length arr in
-      let i = ref 0 in
-      while !i < n do
-        let start = arr.(!i) in
-        let addr  = ci * t.chunk_size + start + header_words in
-        let sz    = get_size t addr in
-        let total = ref (header_words + sz) in
-        let j     = ref (!i + 1) in
-        while !j < n && arr.(!j) = start + !total do
-          let next_addr = ci * t.chunk_size + arr.(!j) + header_words in
-          let next_sz   = get_size t next_addr in
-          total := !total + header_words + next_sz;
-          incr j
-        done;
-        let merged_size = !total - header_words in
-        set_header t addr ~tag:Tag.free ~size:merged_size;
-        arr.(!i) <- start;
-        i := !j
-      done;
-      c.free_list <- -1;
-      for k = n - 1 downto 0 do
-        let slot = arr.(k) in
-        c.data.(slot) <- Value.Int c.free_list;
-        c.free_list   <- slot
-      done
-    end
-
   let alloc_old t ~size ~tag =
-    if size <= 0 then
-      raise (Exception.Alloc_error
-        (Printf.sprintf "alloc_old: size must be > 0, got %d" size));
+    let size   = max min_free_size size in
     let needed = header_words + size in
     if needed > t.chunk_size then
       raise (Exception.Alloc_error
-        (Printf.sprintf "alloc_old: object size %d exceeds chunk_size %d" size t.chunk_size));
-    let found = ref (-1) in
-    let ci    = ref 0 in
+        (Printf.sprintf "alloc_old: size %d exceeds chunk_size" size));
+    let found     = ref (-1) in
+    let start_cls = size_class size in
+    let ci        = ref 0 in
     while !found = -1 && !ci < t.n_chunks do
       let c = t.chunks.(!ci) in
       if c.gen = Old then begin
-        let prev = ref (-1) in
-        let cur  = ref c.free_list in
-        while !found = -1 && !cur <> -1 do
-          let free_addr = !ci * t.chunk_size + !cur + header_words in
-          let free_size = get_size t free_addr in
-          if free_size >= size then begin
-            let next = Value.to_int c.data.(!cur) in
-            if !prev = -1 then c.free_list    <- next
-            else               c.data.(!prev) <- Value.Int next;
-            set_header t free_addr ~tag ~size;
-            for i = 0 to size - 1 do
-              c.data.(!cur + header_words + i) <- Value.Nil
-            done;
-            found := free_addr
-          end else begin
-            prev := !cur;
-            cur  := Value.to_int c.data.(!cur)
-          end
-        done;
-        if !found = -1 && c.free_list <> -1 then begin
-          coalesce_chunk t !ci;
-          let cur2 = ref c.free_list in
-          while !found = -1 && !cur2 <> -1 do
-            let free_addr = !ci * t.chunk_size + !cur2 + header_words in
-            let free_size = get_size t free_addr in
+        let cls = ref start_cls in
+        while !found = -1 && !cls < num_classes do
+          let cur = ref c.free_list.(!cls) in
+          while !found = -1 && !cur <> -1 do
+            let h         = match c.data.(!cur) with Value.Int h -> h | _ -> 0 in
+            let free_size = h lsr 10 in
+            let next      = fl_get_next c !cur in
             if free_size >= size then begin
-              let next    = Value.to_int c.data.(!cur2) in
-              c.free_list <- next;
-              set_header t free_addr ~tag ~size;
-              for i = 0 to size - 1 do
-                c.data.(!cur2 + header_words + i) <- Value.Nil
-              done;
-              found := free_addr
+              fl_remove c !cls !cur;
+              let remainder   = free_size - size - header_words in
+              let actual_size =
+                if remainder >= min_free_size then begin
+                  let new_slot = !cur + header_words + size in
+                  fl_insert c (size_class remainder) new_slot remainder;
+                  size
+                end else
+                  free_size
+              in
+              let addr = !ci * t.chunk_size + !cur + header_words in
+              set_header t addr ~tag ~size:actual_size ~mark:false;
+              Array.fill c.data (!cur + header_words) actual_size Value.Nil;
+              found := addr
             end else
-              cur2 := Value.to_int c.data.(!cur2)
-          done
-        end
+              cur := next
+          done;
+          incr cls
+        done
       end;
       incr ci
     done;
@@ -377,7 +368,7 @@ module Make(H : TRACER) : S with type tracer_ctx = H.ctx = struct
         let c = t.chunks.(!ci) in
         if c.gen = Old && c.top + needed <= c.size then begin
           let addr = !ci * t.chunk_size + c.top + header_words in
-          set_header t addr ~tag ~size;
+          set_header t addr ~tag ~size ~mark:false;
           c.top  <- c.top + needed;
           found  := addr
         end;
@@ -388,7 +379,7 @@ module Make(H : TRACER) : S with type tracer_ctx = H.ctx = struct
       let idx  = add_chunk t Old in
       let c    = t.chunks.(idx) in
       let addr = idx * t.chunk_size + c.top + header_words in
-      set_header t addr ~tag ~size;
+      set_header t addr ~tag ~size ~mark:false;
       c.top  <- c.top + needed;
       found  := addr
     end;
@@ -396,28 +387,76 @@ module Make(H : TRACER) : S with type tracer_ctx = H.ctx = struct
     !found
 
   let free_old t addr =
-    let c_idx = chunk_of t addr in
-    let s     = slot_of  t addr in
-    let c     = t.chunks.(c_idx) in
-    let size  = get_size t addr in
+    let ci   = chunk_of t addr in
+    let c    = t.chunks.(ci) in
+    let slot = slot_of t addr - header_words in
+    let size = get_size t addr in
     for i = 0 to size - 1 do
-      c.data.(s + i) <- Value.Nil
+      match c.data.(slot + header_words + i) with
+      | Value.NativePtr np -> Value.call_finalizer np
+      | _                  -> ()
     done;
-    let hdr_s      = s - header_words in
-    set_header t addr ~tag:Tag.free ~size;
-    c.data.(hdr_s) <- Value.Int c.free_list;
-    c.free_list    <- hdr_s;
+    Array.fill c.data (slot + header_words) size Value.Nil;
+    let mut_slot = ref slot in
+    let mut_size = ref size in
+    let next_slot = slot + header_words + size in
+    if next_slot < c.top then begin
+      let next_h   = match c.data.(next_slot) with Value.Int h -> h | _ -> 0 in
+      let next_tag = (next_h lsr 2) land 0xFF in
+      if next_tag = Tag.free then begin
+        let next_size = next_h lsr 10 in
+        fl_remove c (size_class next_size) next_slot;
+        mut_size := !mut_size + header_words + next_size
+      end
+    end;
+    if slot > 0 then begin
+      let footer_val = match c.data.(slot - 1) with Value.Int n -> n | _ -> -1 in
+      if footer_val >= min_free_size then begin
+        let prev_size = footer_val in
+        let prev_slot = slot - header_words - prev_size in
+        if prev_slot >= 0 then begin
+          let prev_h   = match c.data.(prev_slot) with Value.Int h -> h | _ -> 0 in
+          let prev_tag = (prev_h lsr 2) land 0xFF in
+          if prev_tag = Tag.free && (prev_h lsr 10) = prev_size then begin
+            fl_remove c (size_class prev_size) prev_slot;
+            mut_slot := prev_slot;
+            mut_size := !mut_size + header_words + prev_size
+          end
+        end
+      end
+    end;
+    fl_insert c (size_class !mut_size) !mut_slot !mut_size;
     H.on_free t.tracer_ctx ~addr
 
-  let needs_minor_gc t =
-    t.alloc_count >= t.young_limit
+  let run_finalizers_young t =
+    for i = 0 to t.n_chunks - 1 do
+      let c = t.chunks.(i) in
+      if c.gen = Young then begin
+        let pos = ref 0 in
+        while !pos < c.top do
+          let h    = match c.data.(!pos) with Value.Int h -> h | _ -> 0 in
+          let tag  = (h lsr 2) land 0xFF in
+          let size = max min_free_size (h lsr 10) in
+          if tag <> Tag.free && tag <> Tag.forward then
+            for f = 0 to size - 1 do
+              match c.data.(!pos + header_words + f) with
+              | Value.NativePtr np -> Value.call_finalizer np
+              | _                  -> ()
+            done;
+          pos := !pos + header_words + size
+        done
+      end
+    done
+
+  let needs_minor_gc t = t.alloc_count >= t.young_limit
 
   let reset_young t =
+    run_finalizers_young t;
     for i = 0 to t.n_chunks - 1 do
       let c = t.chunks.(i) in
       if c.gen = Young then begin
         c.top <- 0;
-        Array.fill c.data 0 (Array.length c.data) Value.Nil
+        Array.fill c.data 0 c.size Value.Nil
       end
     done;
     t.alloc_count <- 0
@@ -443,10 +482,11 @@ module Make(H : TRACER) : S with type tracer_ctx = H.ctx = struct
     let c   = t.chunks.(ci) in
     let pos = ref 0 in
     while !pos < c.top do
-      let addr = ci * t.chunk_size + !pos + header_words in
-      let tag  = get_tag  t addr in
-      let size = get_size t addr in
-      if tag <> Tag.free && tag <> Tag.forward then f addr;
+      let h    = match c.data.(!pos) with Value.Int h -> h | _ -> 0 in
+      let tag  = (h lsr 2) land 0xFF in
+      let size = max min_free_size (h lsr 10) in
+      if tag <> Tag.free && tag <> Tag.forward then
+        f (ci * t.chunk_size + !pos + header_words);
       pos := !pos + header_words + size
     done
 
@@ -456,40 +496,36 @@ module Make(H : TRACER) : S with type tracer_ctx = H.ctx = struct
     done
 
   let stats t =
-    let young_used  = ref 0 in
-    let young_total = ref 0 in
-    let old_used    = ref 0 in
-    let old_total   = ref 0 in
+    let yu = ref 0 in
+    let yt = ref 0 in
+    let ou = ref 0 in
+    let ot = ref 0 in
     for i = 0 to t.n_chunks - 1 do
       let c = t.chunks.(i) in
-      match c.gen with
-      | Young ->
-        young_used  := !young_used  + c.top;
-        young_total := !young_total + c.size
-      | Old ->
-        old_used    := !old_used    + c.top;
-        old_total   := !old_total   + c.size
+      if c.gen = Young
+      then (yu := !yu + c.top; yt := !yt + c.size)
+      else (ou := !ou + c.top; ot := !ot + c.size)
     done;
-    { young_used  = !young_used;
-      young_total = !young_total;
-      old_used    = !old_used;
-      old_total   = !old_total;
+    { young_used  = !yu;
+      young_total = !yt;
+      old_used    = !ou;
+      old_total   = !ot;
       n_chunks    = t.n_chunks;
       alloc_count = t.alloc_count }
 
   let inspect t addr =
-    let size   = get_size t addr in
-    let fields = Array.init size (fun i -> raw t addr i) in
+    let size = get_size t addr in
     { addr;
       tag    = get_tag  t addr;
       size;
       gen    = t.chunks.(chunk_of t addr).gen;
       marked = get_mark t addr;
       fwd    = get_fwd  t addr;
-      fields }
+      fields = Array.init size (read t addr) }
 
-  let tracer t = t.tracer_ctx
+  let tracer t   = t.tracer_ctx
   let on_gc t ev = H.on_gc t.tracer_ctx ev
+
 end
 
 module Fast  = Make(No_tracer)
