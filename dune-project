@@ -1,11 +1,11 @@
-(lang dune 3.21)
+(lang dune 3.22)
 
 (name map)
 
 (generate_opam_files true)
 
 (source
- (github debarchito/map))
+ (codeberg debarchito/map))
 
 (authors "Debarchito Nath <debarchiton@proton.me>")
 

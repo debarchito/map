@@ -70,11 +70,11 @@
     },
     "nixpkgs": {
       "locked": {
-        "lastModified": 1772963539,
-        "narHash": "sha256-G4+9cEu8XSqEWYUB6iRgDfrg53av6yyRwAKhSeKbUVw=",
-        "rev": "9dcb002ca1690658be4a04645215baea8b95f31d",
+        "lastModified": 1773821835,
+        "narHash": "sha256-p0tPeJJbg+PKaH741F1CWa9Bf9vf6g02HK9V/g4TkHo=",
+        "rev": "b40629efe5d6ec48dd1efba650c797ddbd39ace0",
         "type": "tarball",
-        "url": "https://releases.nixos.org/nixos/unstable/nixos-26.05pre960399.9dcb002ca169/nixexprs.tar.xz"
+        "url": "https://releases.nixos.org/nixos/unstable/nixos-26.05pre964859.b40629efe5d6/nixexprs.tar.xz"
       },
       "original": {
         "type": "tarball",
@@ -171,11 +171,11 @@
     "opam-repository_2": {
       "flake": false,
       "locked": {
-        "lastModified": 1773078735,
-        "narHash": "sha256-gfEL7ChZOyu7P3GznsA1lUA2be9HXyezBBgnPiNdWZw=",
+        "lastModified": 1773907322,
+        "narHash": "sha256-QpIiPEkKfqO+odLiFcj9JIM4qRwGXXkvTQsX+zm+H6A=",
         "owner": "ocaml",
         "repo": "opam-repository",
-        "rev": "3c70647a78a7fd22066fca4f17f7ca4514500663",
+        "rev": "9f189ca4f94fbb5f0045820bf3c4ffafb21145ef",
         "type": "github"
       },
       "original": {

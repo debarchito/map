@@ -5,10 +5,10 @@ maintainer: ["Debarchito Nath <debarchiton@proton.me>"]
 authors: ["Debarchito Nath <debarchiton@proton.me>"]
 license: "LICENSE"
 tags: ["lisp"]
-homepage: "https://github.com/debarchito/map"
-bug-reports: "https://github.com/debarchito/map/issues"
+homepage: "https://codeberg.org/debarchito/map"
+bug-reports: "https://codeberg.org/debarchito/map/issues"
 depends: [
-  "dune" {>= "3.21"}
+  "dune" {>= "3.22"}
   "ocaml" {>= "5.4.1"}
   "menhir" {>= "20260209"}
   "raylib" {>= "1.6.0"}
@@ -28,5 +28,5 @@ build: [
     "@doc" {with-doc}
   ]
 ]
-dev-repo: "git+https://github.com/debarchito/map.git"
+dev-repo: "git+https://codeberg.org/debarchito/map.git"
 x-maintenance-intent: ["(latest)"]
