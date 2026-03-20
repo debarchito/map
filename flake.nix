@@ -2,16 +2,15 @@
   inputs = {
     nixpkgs.url = "https://channels.nixos.org/nixos-unstable/nixexprs.tar.xz";
     flake-parts.url = "github:hercules-ci/flake-parts";
-    systems.url = "github:nix-systems/default";
     opam-nix.url = "github:tweag/opam-nix";
     opam-repository = {
       url = "github:ocaml/opam-repository";
       flake = false;
     };
   };
+
   outputs =
     {
-      systems,
       flake-parts,
       opam-nix,
       opam-repository,
@@ -22,11 +21,15 @@
         flake-parts.flakeModules.easyOverlay
       ];
 
-      systems = import systems;
+      systems = [
+        "x86_64-linux"
+        "aarch64-linux"
+      ];
 
       perSystem =
         { pkgs, system, ... }:
         let
+          lib = pkgs.lib;
           on = opam-nix.lib.${system};
 
           basePackagesQuery = {
@@ -43,11 +46,22 @@
           );
 
           devPackages = builtins.attrValues (pkgs.lib.getAttrs (builtins.attrNames devPackagesQuery) scope);
+
+          format =
+            pkgs.writers.writeFishBin "format" { }
+              # fish
+              ''
+                ${lib.getExe pkgs.fd} -e ml -e mli --exclude _build | xargs ${lib.getExe' scope.ocamlformat "ocamlformat"} --inplace
+                echo "[+] Formatting finished."
+              '';
         in
         {
+          formatter = format;
+
           packages = rec {
             inherit (scope) map;
             default = map;
+            inherit format;
           };
 
           overlayAttrs = {

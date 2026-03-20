@@ -1,11 +1,11 @@
-exception Type_error     of string
-exception Bounds_error   of string
-exception Div_by_zero    of string
+exception Type_error of string
+exception Bounds_error of string
+exception Div_by_zero of string
 exception Stack_overflow of string
-exception Alloc_error    of string
-exception Native_error   of exn
-exception Registered     of int * string
-exception Arity_error    of string
+exception Alloc_error of string
+exception Native_error of exn
+exception Registered of int * string
+exception Arity_error of string
 
 type t =
   | Type_error
@@ -17,13 +17,13 @@ type t =
   | Arity_error
 
 let to_int = function
-  | Type_error     -> 0
-  | Bounds_error   -> 1
-  | Div_by_zero    -> 2
+  | Type_error -> 0
+  | Bounds_error -> 1
+  | Div_by_zero -> 2
   | Stack_overflow -> 3
-  | Alloc_error    -> 4
-  | Native_error   -> 5
-  | Arity_error    -> 6
+  | Alloc_error -> 4
+  | Native_error -> 5
+  | Arity_error -> 6
 
 let of_int = function
   | 0 -> Some Type_error
@@ -36,25 +36,22 @@ let of_int = function
   | _ -> None
 
 let to_string = function
-  | Type_error     -> "TypeError"
-  | Bounds_error   -> "BoundsError"
-  | Div_by_zero    -> "DivByZero"
+  | Type_error -> "TypeError"
+  | Bounds_error -> "BoundsError"
+  | Div_by_zero -> "DivByZero"
   | Stack_overflow -> "StackOverflow"
-  | Alloc_error    -> "AllocError"
-  | Native_error   -> "NativeError"
-  | Arity_error    -> "ArityError"
+  | Alloc_error -> "AllocError"
+  | Native_error -> "NativeError"
+  | Arity_error -> "ArityError"
 
 let reserved_codes = 7
 
 type registry = {
-  mutable entries   : (int * string) array;
+  mutable entries : (int * string) array;
   mutable next_code : int;
 }
 
-let create () = {
-  entries   = Array.make 64 (0, "");
-  next_code = reserved_codes;
-}
+let create () = { entries = Array.make 64 (0, ""); next_code = reserved_codes }
 
 let register registry ~name =
   let code = registry.next_code in
@@ -63,15 +60,12 @@ let register registry ~name =
   code
 
 let name_of registry code =
-  if code < reserved_codes then
-    of_int code |> Option.map to_string
+  if code < reserved_codes then of_int code |> Option.map to_string
   else
     let idx = code - reserved_codes in
     if idx < Array.length registry.entries then
-      let (_, name) = registry.entries.(idx) in
+      let _, name = registry.entries.(idx) in
       if name = "" then None else Some name
-    else
-      None
+    else None
 
-let throw code msg =
-  raise (Registered (code, msg))
+let throw code msg = raise (Registered (code, msg))
