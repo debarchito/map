@@ -1,3 +1,3 @@
 (library
- (name core)
+ (name map_core)
  (modules type exception value tag config))

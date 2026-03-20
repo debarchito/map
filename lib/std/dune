@@ -1,4 +1,0 @@
-(library
- (name std)
- (libraries core map raylib)
- (modules mstring math gui))

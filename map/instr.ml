@@ -9,6 +9,7 @@ type t =
   | LoadF   of reg * float
   | LoadNil of reg
   | LoadK   of reg * int
+  | LoadS   of reg * int64
 
   | Add  of reg * reg * reg
   | Sub  of reg * reg * reg
@@ -66,6 +67,7 @@ let to_string = function
   | LoadF  (d,f)     -> Printf.sprintf "LoadF      r%d <- %g" d f
   | LoadNil d        -> Printf.sprintf "LoadNil    r%d" d
   | LoadK  (d,i)     -> Printf.sprintf "LoadK      r%d <- k[%d]" d i
+  | LoadS  (d,id)    -> Printf.sprintf "LoadS      r%d <- sym[0x%Lx]" d id
   | Add  (d,a,b)     -> Printf.sprintf "Add        r%d <- r%d + r%d" d a b
   | Sub  (d,a,b)     -> Printf.sprintf "Sub        r%d <- r%d - r%d" d a b
   | Mul  (d,a,b)     -> Printf.sprintf "Mul        r%d <- r%d * r%d" d a b

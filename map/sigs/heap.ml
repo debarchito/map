@@ -1,4 +1,4 @@
-open Core
+open Map_core
 
 type gen = Young | Old
 
@@ -12,6 +12,7 @@ type event =
 type stats = {
   young_used  : int;
   young_total : int;
+  young_limit : int;
   old_used    : int;
   old_total   : int;
   n_chunks    : int;
@@ -68,6 +69,7 @@ module type S = sig
   val reset_young           : t -> unit
   val chunk_size            : t -> int
   val on_gc                 : t -> event -> unit
+  val on_promote            : t -> int -> unit 
   val iter_young_chunks     : t -> (int -> chunk -> unit) -> unit
   val iter_old_chunks       : t -> (int -> chunk -> unit) -> unit
   val iter_dirty_old_chunks : t -> (int -> chunk -> unit) -> unit

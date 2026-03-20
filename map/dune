@@ -1,0 +1,4 @@
+(library
+ (name map)
+ (modules heap gc instr vm core symbol namespace)
+ (libraries map_core sigs))

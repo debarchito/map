@@ -27,7 +27,7 @@ module Gc = struct
   }
 
   let default = {
-    major_threshold     = 65536;
+    major_threshold     = 4096;
     major_growth_factor = 2.0;
   }
 

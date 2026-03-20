@@ -1,0 +1,5 @@
+(library
+ (name fold_core)
+ (wrapped true)
+ (libraries map)
+ (modules tag))

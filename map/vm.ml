@@ -1,4 +1,4 @@
-open Core
+open Map_core
 
 let bytecode_id : Instr.t array Type.Id.t = Type.Id.make ()
 
@@ -52,16 +52,17 @@ module type S = sig
   type heap_t
   type t
 
-  val create     : Config.t -> Instr.t array -> heap_tracer_ctx -> tracer_ctx -> t
-  val run        : t -> unit
-  val step       : t -> unit
-  val reset      : t -> unit
-  val is_done    : t -> bool
-  val get_reg    : t -> int -> Value.t
-  val set_reg    : t -> int -> Value.t -> unit
+  val create    : Config.t -> Instr.t array -> heap_tracer_ctx -> tracer_ctx -> t
+  val run       : t -> unit
+  val step      : t -> unit
+  val reset     : t -> unit
+  val is_done   : t -> bool
+  val get_reg   : t -> int -> Value.t
+  val set_reg   : t -> int -> Value.t -> unit
   val get_status : t -> string
-  val heap       : t -> heap_t
+  val heap      : t -> heap_t
   val set_const : t -> int -> Value.t -> unit
+  val symbols   : t -> Symbol.registry
 end
 
 module Make(H : Heap.S)(T : TRACER) : S
@@ -94,6 +95,7 @@ module Make(H : Heap.S)(T : TRACER) : S
     mutable pc         : int;
     mutable status     : status;
     tracer_ctx         : T.ctx;
+    symbols            : Symbol.registry;
   }
 
   let create (cfg : Config.t) program heap_tracer_ctx tracer_ctx =
@@ -118,7 +120,8 @@ module Make(H : Heap.S)(T : TRACER) : S
       handler_sp  = 0;
       pc          = 0;
       status      = Running;
-      tracer_ctx }
+      tracer_ctx;
+      symbols     = Symbol.create () }
 
   let roots vm = [| vm.regs; vm.constants |]
 
@@ -195,12 +198,13 @@ module Make(H : Heap.S)(T : TRACER) : S
   and guard_with vm default f =
     match f () with
     | v -> v
-    | exception Exception.Bounds_error   m -> fault vm m; default
-    | exception Exception.Alloc_error    m -> fault vm m; default
-    | exception Exception.Type_error     m -> fault vm m; default
-    | exception Exception.Div_by_zero    m -> fault vm m; default
-    | exception Exception.Stack_overflow m -> fault vm m; default
-    | exception Exception.Native_error   e -> fault vm (Printexc.to_string e); default
+    | exception Exception.Bounds_error       m -> fault vm m; default
+    | exception Exception.Alloc_error        m -> fault vm m; default
+    | exception Exception.Type_error         m -> fault vm m; default
+    | exception Exception.Arity_error        m -> fault vm m; default
+    | exception Exception.Div_by_zero        m -> fault vm m; default
+    | exception Exception.Stack_overflow     m -> fault vm m; default
+    | exception Exception.Native_error       e -> fault vm (Printexc.to_string e); default
     | exception Exception.Registered (code, _) -> throw_code vm code; default
 
   let guard     vm f = guard_with vm Value.Nil              f
@@ -333,6 +337,12 @@ module Make(H : Heap.S)(T : TRACER) : S
             fault vm (Printf.sprintf "constant index %d out of range" idx)
           else
             vm.regs.(base + dst) <- vm.constants.(idx)
+
+        | Instr.LoadS (dst, id) ->
+          (match Symbol.resolve vm.symbols id with
+           | Some v -> vm.regs.(base + dst) <- v
+           | None   ->
+             fault vm (Printf.sprintf "LoadS: unresolved symbol 0x%Lx" id))
 
         | Instr.Add (dst, a, b) ->
           (match vm.regs.(base + a), vm.regs.(base + b) with
@@ -528,10 +538,12 @@ module Make(H : Heap.S)(T : TRACER) : S
             ~program:(current_program vm)
 
         | Instr.DCall (fn_reg, arg_start, arg_end, ret_dst) ->
-          do_dcall vm ~pc ~fn_reg ~arg_start ~arg_end ~ret_dst
+          do_dcall vm ~pc ~fn_reg ~arg_start ~arg_end ~ret_dst;
+          maybe_gc vm
 
         | Instr.TDCall (fn_reg, arg_start, arg_end) ->
-          do_tdcall vm ~pc ~fn_reg ~arg_start ~arg_end
+          do_tdcall vm ~pc ~fn_reg ~arg_start ~arg_end;
+          maybe_gc vm
 
         | Instr.Ret src ->
           if vm.frame_sp = 0 then
@@ -593,15 +605,15 @@ module Make(H : Heap.S)(T : TRACER) : S
 
   let get_reg    vm i   = vm.regs.(i)
   let set_reg    vm i v = vm.regs.(i) <- v
+  let set_const  vm i v = vm.constants.(i) <- v
   let heap       vm     = vm.heap
+  let symbols    vm     = vm.symbols
 
   let get_status vm =
     match vm.status with
     | Running  -> "running"
     | Halted   -> "halted"
     | Fault  m -> Printf.sprintf "fault: %s" m
-
-  let set_const vm i v = vm.constants.(i) <- v
 
 end
 

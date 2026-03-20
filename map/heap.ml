@@ -1,4 +1,4 @@
-open Core
+open Map_core
 
 include Sigs.Heap
 
@@ -432,6 +432,7 @@ module Make(H : TRACER) : S with type tracer_ctx = H.ctx = struct
     done;
     { young_used  = !yu;
       young_total = !yt;
+      young_limit = t.young_limit;
       old_used    = !ou;
       old_total   = !ot;
       n_chunks    = t.n_chunks;
@@ -449,6 +450,7 @@ module Make(H : TRACER) : S with type tracer_ctx = H.ctx = struct
 
   let tracer t   = t.tracer_ctx
   let on_gc t ev = H.on_gc t.tracer_ctx ev
+  let on_promote t addr = H.on_promote t.tracer_ctx ~addr
 
 end
 

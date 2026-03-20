@@ -1,4 +1,4 @@
-open Core
+open Map_core
 
 module Heap = Sigs.Heap
 
@@ -19,9 +19,10 @@ module Make(H : Heap.S) = struct
         H.write h dst i (H.read h addr i)
       done;
       H.set_fwd h addr dst;
+      H.on_promote h dst;
       incr promoted;
       dst
-    end
+  end
 
   let scan_object h ~promoted worklist addr =
     let size = H.get_size h addr in

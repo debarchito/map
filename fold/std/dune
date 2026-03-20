@@ -1,0 +1,15 @@
+(library
+ (name fold_std)
+ (wrapped true)
+ (libraries fold_core utils map raylib)
+ (modules
+  fold_buffer
+  fold_string
+  fold_symbol
+  fold_cons
+  fold_vector
+  fold_hash
+  fold_variant
+  fold_record
+  fold_math
+  fold_raylib))

@@ -5,6 +5,7 @@ exception Stack_overflow of string
 exception Alloc_error    of string
 exception Native_error   of exn
 exception Registered     of int * string
+exception Arity_error    of string
 
 type t =
   | Type_error
@@ -13,6 +14,7 @@ type t =
   | Stack_overflow
   | Alloc_error
   | Native_error
+  | Arity_error
 
 let to_int = function
   | Type_error     -> 0
@@ -21,6 +23,7 @@ let to_int = function
   | Stack_overflow -> 3
   | Alloc_error    -> 4
   | Native_error   -> 5
+  | Arity_error    -> 6
 
 let of_int = function
   | 0 -> Some Type_error
@@ -29,6 +32,7 @@ let of_int = function
   | 3 -> Some Stack_overflow
   | 4 -> Some Alloc_error
   | 5 -> Some Native_error
+  | 6 -> Some Arity_error
   | _ -> None
 
 let to_string = function
@@ -38,8 +42,9 @@ let to_string = function
   | Stack_overflow -> "StackOverflow"
   | Alloc_error    -> "AllocError"
   | Native_error   -> "NativeError"
+  | Arity_error    -> "ArityError"
 
-let reserved_codes = 6
+let reserved_codes = 7
 
 type registry = {
   mutable entries   : (int * string) array;

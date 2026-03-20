@@ -1,4 +1,4 @@
 (library
  (name sigs)
- (libraries core)
+ (libraries map_core)
  (modules heap))
