@@ -1,6 +1,5 @@
 (library
  (name fold_std)
- (wrapped true)
  (libraries fold_core utils map raylib)
  (modules
   fold_buffer

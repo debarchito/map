@@ -1,4 +1,4 @@
 (library
  (name fold)
- (wrapped true)
- (libraries fold_core fold_std map raylib))
+ (libraries fold_core fold_std map raylib)
+ (modules core std))

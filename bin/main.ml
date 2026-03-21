@@ -1,5 +1,4 @@
 open Map_core
-open Map.Instr
 
 let cfg = Config.default
 
@@ -13,18 +12,7 @@ module VariantDebug = Fold.Std.Variant.Make (Map.Heap.Debug)
 module RecordDebug = Fold.Std.Record.Make (Map.Heap.Debug)
 module RaylibDebug = Fold.Std.Raylib.Make (Map.Heap.Debug)
 
-let program = Array.make 46 Nop
-
-let () =
-  let tc = Map.Vm.Full_tracer.make () in
-  let hc =
-    Map.Heap.Full_tracer.make ~max_chunks:cfg.Config.heap.max_chunks
-      ~chunk_size:cfg.Config.heap.chunk_size ~sample_rate:1
-  in
-  let vm = Map.Vm.Debug.create cfg program hc tc in
-  let heap = Map.Vm.Debug.heap vm in
-  let reg = Map.Vm.Debug.symbols vm in
-
+let register_stdlib heap reg =
   BufferDebug.register heap reg;
   StringDebug.register heap reg;
   SymbolDebug.register heap reg;
@@ -33,58 +21,94 @@ let () =
   HashDebug.register heap reg;
   VariantDebug.register heap reg;
   RecordDebug.register heap reg;
-
   Fold.Std.Math.register reg;
-  RaylibDebug.register heap reg;
+  RaylibDebug.register heap reg
 
-  let sym = Map.Symbol.sym reg in
+let () =
+  let tc = Map.Vm.Full_tracer.make () in
+  let hc =
+    Map.Heap.Full_tracer.make ~max_chunks:cfg.Config.heap.max_chunks
+      ~chunk_size:cfg.Config.heap.chunk_size ~sample_rate:1
+  in
+
+  let sym_vm = Map.Vm.Debug.create cfg (Array.make 1 Map.Instr.Nop) hc tc in
+  let sym_heap = Map.Vm.Debug.heap sym_vm in
+  let sym_reg = Map.Vm.Debug.symbols sym_vm in
+  register_stdlib sym_heap sym_reg;
+  let sym = Map.Symbol.sym sym_reg in
+
+  let asm = Map.Asm.create () in
+  let open Map.Instr in
+  ignore (Map.Asm.push_scope asm);
+
+  let k_title = Map.Asm.const_value asm Value.Nil in
+  let k_fmt = Map.Asm.const_value asm Value.Nil in
+  ignore (k_title, k_fmt);
+
+  Map.Asm.emit asm (LoadS (1, sym "std/math/cos")) |> ignore;
+  Map.Asm.emit asm (LoadF (10, 9.0)) |> ignore;
+  Map.Asm.emit asm (DCall (1, 10, 10, 11)) |> ignore;
+
+  Map.Asm.emit asm (LoadS (4, sym "std/raylib/init_window")) |> ignore;
+  Map.Asm.emit asm (Load (5, 800)) |> ignore;
+  Map.Asm.emit asm (Load (6, 450)) |> ignore;
+  Map.Asm.emit asm (LoadK (7, 0)) |> ignore;
+  Map.Asm.emit asm (DCall (4, 5, 7, 8)) |> ignore;
+
+  Map.Asm.label asm "loop";
+  Map.Asm.emit asm (LoadS (20, sym "std/raylib/window_should_close")) |> ignore;
+  Map.Asm.emit asm (DCall (20, 20, 20, 21)) |> ignore;
+  Map.Asm.jnz asm 21 "close";
+
+  Map.Asm.emit asm (LoadS (20, sym "std/raylib/begin_drawing")) |> ignore;
+  Map.Asm.emit asm (DCall (20, 20, 20, 8)) |> ignore;
+
+  Map.Asm.emit asm (LoadS (20, sym "std/raylib/clear_background")) |> ignore;
+  Map.Asm.emit asm (Load (1, 245)) |> ignore;
+  Map.Asm.emit asm (Load (2, 245)) |> ignore;
+  Map.Asm.emit asm (Load (3, 245)) |> ignore;
+  Map.Asm.emit asm (Load (4, 255)) |> ignore;
+  Map.Asm.emit asm (DCall (20, 1, 4, 8)) |> ignore;
+
+  Map.Asm.emit asm (LoadS (32, sym "std/string/format")) |> ignore;
+  Map.Asm.emit asm (LoadK (33, 1)) |> ignore;
+  Map.Asm.emit asm (Mov (34, 10)) |> ignore;
+  Map.Asm.emit asm (Mov (35, 11)) |> ignore;
+  Map.Asm.emit asm (DCall (32, 33, 35, 36)) |> ignore;
+
+  Map.Asm.emit asm (LoadS (20, sym "std/raylib/draw_text")) |> ignore;
+  Map.Asm.emit asm (Mov (1, 36)) |> ignore;
+  Map.Asm.emit asm (Load (2, 150)) |> ignore;
+  Map.Asm.emit asm (Load (3, 180)) |> ignore;
+  Map.Asm.emit asm (Load (4, 28)) |> ignore;
+  Map.Asm.emit asm (DCall (20, 1, 4, 8)) |> ignore;
+
+  Map.Asm.emit asm (LoadS (20, sym "std/raylib/end_drawing")) |> ignore;
+  Map.Asm.emit asm (DCall (20, 20, 20, 8)) |> ignore;
+
+  Map.Asm.jmp asm "loop";
+
+  Map.Asm.label asm "close";
+  Map.Asm.emit asm (LoadS (20, sym "std/raylib/close_window")) |> ignore;
+  Map.Asm.emit asm (DCall (20, 20, 20, 8)) |> ignore;
+  Map.Asm.emit asm Halt |> ignore;
+
+  Map.Asm.pop_scope asm;
+
+  let linked = Map.Asm.link asm in
+
+  let vm = Map.Vm.Debug.create cfg linked.Map.Asm.program hc tc in
+  let heap = Map.Vm.Debug.heap vm in
+  let reg = Map.Vm.Debug.symbols vm in
+  register_stdlib heap reg;
 
   Map.Vm.Debug.set_const vm 0 (StringDebug.of_ocaml heap "Map Window");
   Map.Vm.Debug.set_const vm 1
     (StringDebug.of_ocaml heap "(assert (cos %g) %g) ; #t");
 
-  let p = program in
-  (*  0 *)
-  p.(0) <- LoadS (1, sym "std/math/cos");
-  (*  1 *) p.(1) <- LoadF (10, 9.0);
-  (*  2 *) p.(2) <- DCall (1, 10, 10, 11);
-  (*  3 *) p.(3) <- LoadS (4, sym "std/raylib/init_window");
-  (*  4 *) p.(4) <- Load (5, 800);
-  (*  5 *) p.(5) <- Load (6, 450);
-  (*  6 *) p.(6) <- LoadK (7, 0);
-  (*  7 *) p.(7) <- DCall (4, 5, 7, 8);
-  (*  8 *) p.(8) <- LoadS (20, sym "std/raylib/window_should_close");
-  (*  9 *) p.(9) <- DCall (20, 5, 5, 21);
-  (* 10 *) p.(10) <- Jnz (21, 40);
-  (* 11 *) p.(11) <- LoadS (20, sym "std/raylib/begin_drawing");
-  (* 12 *) p.(12) <- DCall (20, 5, 5, 8);
-  (* 13 *) p.(13) <- LoadS (20, sym "std/raylib/clear_background");
-  (* 14 *) p.(14) <- Load (22, 245);
-  (* 15 *) p.(15) <- Load (23, 245);
-  (* 16 *) p.(16) <- Load (24, 245);
-  (* 17 *) p.(17) <- Load (25, 255);
-  (* 18 *) p.(18) <- DCall (20, 22, 25, 8);
-  (* 19 *) p.(19) <- LoadS (32, sym "std/string/format");
-  (* 20 *) p.(20) <- LoadK (33, 1);
-  (* 21 *) p.(21) <- Mov (34, 10);
-  (* 22 *) p.(22) <- Mov (35, 11);
-  (* 23 *) p.(23) <- DCall (32, 33, 35, 36);
-  (* 24 *) p.(24) <- LoadS (20, sym "std/raylib/draw_text");
-  (* 25 *) p.(25) <- Load (37, 150);
-  (* 26 *) p.(26) <- Load (38, 180);
-  (* 27 *) p.(27) <- Load (39, 28);
-  (* 28 *) p.(28) <- DCall (20, 36, 39, 8);
-  (* 29 *) p.(29) <- LoadS (20, sym "std/raylib/end_drawing");
-  (* 30 *) p.(30) <- DCall (20, 5, 5, 8);
-  (* 31 *) p.(31) <- Jmp 8;
-  (* 40 *) p.(40) <- LoadS (20, sym "std/raylib/close_window");
-  (* 41 *) p.(41) <- DCall (20, 5, 5, 8);
-  (* 42 *) p.(42) <- Halt;
-
   Map.Vm.Debug.run vm;
 
   Printf.printf "[STATUS] %s\n" (Map.Vm.Debug.get_status vm);
-
   Printf.printf "\n[FINAL REGISTERS]\n\n";
   for i = 0 to cfg.Config.vm.num_registers - 1 do
     let v = Map.Vm.Debug.get_reg vm i in

@@ -1,4 +1,4 @@
 (library
  (name map)
- (modules heap gc instr vm core symbol namespace)
+ (modules heap gc instr vm core symbol namespace asm)
  (libraries map_core sigs))

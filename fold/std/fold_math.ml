@@ -1,4 +1,4 @@
-open Map_core
+open Map.Core
 open Map.Namespace
 
 let registry = Exception.create ()
